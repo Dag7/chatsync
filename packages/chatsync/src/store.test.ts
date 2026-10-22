@@ -118,6 +118,13 @@ describe("loadStore", () => {
     expect(() => loadStore(appDir)).toThrow(exit2(/local_bad\.json/));
   });
 
+  it("sessionId not matching the file name -> exit 2 naming the file", () => {
+    const appDir = makeAppDir(tmpDir(), { accounts: { [A]: { [ORG1]: [] } } });
+    const dir = join(sessionsDir(appDir), A, ORG1);
+    writeFileSync(join(dir, "local_bad.json"), JSON.stringify({ sessionId: "../../../x", lastActivityAt: 1 }));
+    expect(() => loadStore(appDir)).toThrow(exit2(/local_bad\.json/));
+  });
+
   it("missing sessionId -> exit 2", () => {
     const appDir = makeAppDir(tmpDir(), { accounts: { [A]: { [ORG1]: [] } } });
     writeFileSync(join(sessionsDir(appDir), A, ORG1, "local_bad.json"), JSON.stringify({ lastActivityAt: 1 }));

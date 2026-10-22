@@ -1,19 +1,63 @@
-import { join } from "node:path";
+import { statSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { createBackup, pruneBackups } from "./backup.js";
 import { ChatsyncError } from "./errors.js";
 import { writeFileAtomic } from "./fs-util.js";
-import type { Plan, SyncState } from "./plan.js";
+import type { Plan, SyncState, Write } from "./plan.js";
 import { saveState } from "./state.js";
 
 export type ApplyResult = { backup: string | null; written: number; pruned: string[]; warning?: string };
 
-/** Every chat mapped to every account holding it once the plan's writes are in place. */
+const SESSION_ID = /^local_[A-Za-z0-9_-]+$/;
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function isDir(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** True when `child` is strictly inside `parent` (both resolved). */
+function isInside(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+/**
+ * Where a write goes. Throws (exit 2) unless the session id is a plain `local_*` name and the
+ * target is a file directly inside an existing `<sessionsDir>/<account>/<org>` folder.
+ */
+function targetFor(w: Write, root: string): string {
+  const bad = (why: string): ChatsyncError =>
+    new ChatsyncError(`Refusing to write chat "${w.sessionId}" to ${w.accountId}/${w.orgId}: ${why}`, 2);
+  if (!SESSION_ID.test(w.sessionId)) throw bad("unexpected session id");
+  const orgDir = resolve(root, w.accountId, w.orgId);
+  const rootDir = resolve(root);
+  if (!isInside(rootDir, orgDir) || relative(rootDir, orgDir).split(/[\\/]/).length !== 2) {
+    throw bad("account or organization folder is outside the sessions folder");
+  }
+  if (!isDir(orgDir)) throw bad(`folder ${orgDir} does not exist`);
+  const file = resolve(orgDir, `${w.sessionId}.json`);
+  if (!isInside(orgDir, file) || resolve(file, "..") !== orgDir) throw bad("target is outside the organization folder");
+  return file;
+}
+
+/**
+ * Each account's `lastActivityAt` for every chat once the writes are in place: accounts that
+ * receive a write get the newest value, others keep their own newest copy.
+ */
 function stateAfter(plan: Plan): SyncState {
   const sessions: SyncState["sessions"] = {};
   for (const chat of plan.chats) {
-    const at = chat.newest.data.lastActivityAt;
     const accounts: Record<string, number> = {};
-    for (const copy of chat.copies) accounts[copy.accountId] = at;
+    for (const copy of chat.copies) {
+      accounts[copy.accountId] = Math.max(accounts[copy.accountId] ?? -Infinity, copy.data.lastActivityAt);
+    }
     sessions[chat.sessionId] = accounts;
   }
   for (const w of plan.writes) {
@@ -24,9 +68,10 @@ function stateAfter(plan: Plan): SyncState {
 }
 
 /**
- * Applies a plan: back up the sessions folder first (a failure aborts before anything is written),
- * then write each entry atomically, record the new sync state, and prune old backups.
- * A prune failure never fails the sync; it is returned as `warning`.
+ * Applies a plan: validate every target, back up the sessions folder (a failure aborts before
+ * anything is written), write each entry atomically, record the new sync state, prune old backups.
+ * Failures to save state or prune after the entries are written never fail the sync; they are
+ * returned as `warning`.
  */
 export function applyPlan(plan: Plan, o: { sessionsDir: string; home: string; now?: Date }): ApplyResult {
   const state = stateAfter(plan);
@@ -35,18 +80,18 @@ export function applyPlan(plan: Plan, o: { sessionsDir: string; home: string; no
     return { backup: null, written: 0, pruned: [] };
   }
 
+  const targets = plan.writes.map((w) => ({ file: targetFor(w, o.sessionsDir), data: w.data }));
+
   const backupsDir = join(o.home, "backups");
   const backup = createBackup({ sessionsDir: o.sessionsDir, backupsDir, ...(o.now ? { now: o.now } : {}) });
 
   let written = 0;
-  for (const w of plan.writes) {
-    const file = join(o.sessionsDir, w.accountId, w.orgId, `${w.sessionId}.json`);
+  for (const t of targets) {
     try {
-      writeFileAtomic(file, JSON.stringify(w.data));
+      writeFileAtomic(t.file, JSON.stringify(t.data));
     } catch (err: unknown) {
-      const reason = err instanceof Error ? err.message : String(err);
       throw new ChatsyncError(
-        `Failed to write ${file} after ${written} of ${plan.writes.length} entries: ${reason}. ` +
+        `Failed to write ${t.file} after ${written} of ${targets.length} entries: ${errorMessage(err)}. ` +
           `Your previous sessions are saved in ${join(backupsDir, backup)}`,
         1,
       );
@@ -54,12 +99,19 @@ export function applyPlan(plan: Plan, o: { sessionsDir: string; home: string; no
     written++;
   }
 
-  saveState(o.home, state);
-
+  const warnings: string[] = [];
   try {
-    return { backup, written, pruned: pruneBackups(backupsDir) };
+    saveState(o.home, state);
   } catch (err: unknown) {
-    const reason = err instanceof Error ? err.message : String(err);
-    return { backup, written, pruned: [], warning: `Synced, but could not prune old backups: ${reason}` };
+    warnings.push(`Synced, but could not save sync state: ${errorMessage(err)}`);
   }
+
+  let pruned: string[] = [];
+  try {
+    pruned = pruneBackups(backupsDir);
+  } catch (err: unknown) {
+    warnings.push(`Synced, but could not prune old backups: ${errorMessage(err)}`);
+  }
+
+  return { backup, written, pruned, ...(warnings.length > 0 ? { warning: warnings.join("; ") } : {}) };
 }

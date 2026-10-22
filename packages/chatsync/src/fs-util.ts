@@ -11,7 +11,11 @@ export function writeFileAtomic(file: string, contents: string): void {
     writeFileSync(tmp, contents);
     renameSync(tmp, file);
   } catch (err: unknown) {
-    rmSync(tmp, { force: true });
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // cleanup is best effort; the original error is what matters
+    }
     throw err;
   }
 }

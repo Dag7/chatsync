@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync, statSync, type Stats } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { ChatsyncError } from "./errors.js";
 import { sessionsDir } from "./paths.js";
 
@@ -76,6 +76,12 @@ function readEntry(file: string, accountId: string, orgId: string): Entry {
   if (!isRecord(parsed) || typeof parsed.sessionId !== "string" || typeof parsed.lastActivityAt !== "number") {
     throw new ChatsyncError(
       `Unrecognized sidebar entry ${file}: expected string "sessionId" and number "lastActivityAt"`,
+      2,
+    );
+  }
+  if (parsed.sessionId !== basename(file, ".json")) {
+    throw new ChatsyncError(
+      `Unrecognized sidebar entry ${file}: "sessionId" must match the file name (found "${parsed.sessionId}")`,
       2,
     );
   }
