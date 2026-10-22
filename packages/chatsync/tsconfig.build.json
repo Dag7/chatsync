@@ -1,1 +1,5 @@
-{ "extends": "./tsconfig.json", "exclude": ["node_modules", "dist", "**/*.test.ts", "src/test-helpers.ts"] }
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "tsBuildInfoFile": "./dist/.tsbuildinfo" },
+  "exclude": ["node_modules", "dist", "**/*.test.ts", "src/test-helpers.ts"]
+}
