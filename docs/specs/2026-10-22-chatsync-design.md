@@ -1,6 +1,6 @@
 # chatsync — design
 
-Status: draft for review · 2026-10-22
+Status: approved 2026-10-22 · amended same day: TypeScript + Nx (oramono setup)
 
 ## Problem
 
@@ -85,8 +85,11 @@ machine nickname overrides (`{ "ws-gad-link-dc": "link" }`).
 
 ## CLI
 
-Runs on Node ≥ 18, ESM, plain JavaScript, **no runtime dependencies** (menus use
-`node:readline`). Binary name `chatsync`.
+TypeScript, built with `tsc` to ESM, Node ≥ 20. Binary name `chatsync`. The repo is an Nx
+workspace modeled on oramono (yarn 4 workspaces, Nx 23, TypeScript 6, vitest 4, ESLint 10 +
+Prettier). Runtime dependencies follow oramono's `ora-cli`: `commander` for commands and
+`@inquirer/prompts` for the interactive menu, behind an injectable `Prompter` interface so
+tests never need a terminal.
 
 | Command | Behavior |
 |---|---|
@@ -123,24 +126,32 @@ with exit code 2.
 
 ## Code layout
 
+Nx workspace; the published package is `packages/chatsync`.
+
 ```
-bin/chatsync.js        entry, argument parsing, menu
-src/paths.js           platform detection and app data paths
-src/store.js           read accounts/orgs/entries, active account, ssh names
-src/plan.js            pure: entries + active account + state → list of writes and conflicts
-src/apply.js           backup, atomic writes, state update
-src/backup.js          create, list, prune, restore
-src/format.js          tables and report text
-test/                  node:test, fixture folders built in a temp dir
+nx.json, package.json, tsconfig.base.json, eslint.config.mjs, .prettierrc, vitest.shared.ts
+packages/chatsync/
+  project.json             nx targets: build, typecheck, test, lint
+  src/index.ts             entry: wires process to the program
+  src/program.ts           commander program; all behavior injectable via ProgramDeps
+  src/prompter.ts          Prompter interface + inquirer implementation
+  src/paths.ts             platform detection and app data paths
+  src/store.ts             read accounts/orgs/entries, active account, ssh names
+  src/plan.ts              pure: entries + active account + state → writes and conflicts
+  src/apply.ts             backup, atomic writes, state update
+  src/backup.ts            create, list, prune, restore
+  src/format.ts            tables and report text
+  src/**/*.test.ts         vitest, colocated; fixture folders built in a temp dir
 ```
 
-`plan.js` is pure and carries most of the tests: round trip A → B → A, conflict,
+`plan.ts` is pure and carries most of the tests: round trip A → B → A, conflict,
 archived chat, chat only in the active account, missing fields, multiple org folders.
 
 ## Packaging
 
-- npm package `chatsync` (unscoped, free as of 2026-10-22), `bin: { chatsync }`,
-  `files: [bin, src, README.md, LICENSE]`, MIT license.
+- npm package `chatsync` (unscoped, free as of 2026-10-22), from `packages/chatsync`,
+  `bin: { chatsync: ./dist/index.js }`, `files: [dist, README.md, LICENSE]`, MIT license.
+  The workspace root is private.
 - README: what it does, the "run sync before switching accounts" workflow, safety rules,
   the fact that it relies on undocumented app files.
 - Publishing is done by the owner (`npm publish`), not by automation in v1.
