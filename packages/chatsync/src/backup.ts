@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { type Dirent, cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { ChatsyncError } from "./errors.js";
 
@@ -71,30 +71,48 @@ function compareNewestFirst(a: string, b: string): number {
   return pb.n - pa.n;
 }
 
-/** Backups newest first. A missing directory means no backups. */
-export function listBackups(backupsDir: string): BackupInfo[] {
-  let names: string[];
+const BACKUP_NAME = /^\d{4}-\d{2}-\d{2}_\d{6}(-\d+)?$/;
+
+/** Names of real backups (timestamp-shaped directories) newest first. Anything else in the folder is never touched. */
+function backupNames(backupsDir: string): string[] {
+  let entries: Dirent[];
   try {
-    names = readdirSync(backupsDir, { withFileTypes: true })
-      .filter((e) => e.isDirectory() && !e.name.endsWith(PARTIAL))
-      .map((e) => e.name);
+    entries = readdirSync(backupsDir, { withFileTypes: true });
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
     const reason = err instanceof Error ? err.message : String(err);
     throw new ChatsyncError(`Cannot read backups folder: ${reason}`, 1);
   }
-  return names.sort(compareNewestFirst).map((name) => {
+  return entries
+    .filter((e) => e.isDirectory() && BACKUP_NAME.test(e.name))
+    .map((e) => e.name)
+    .sort(compareNewestFirst);
+}
+
+/**
+ * Backups newest first. A missing directory means no backups. `chatCount` is -1 for a backup
+ * whose contents cannot be read; that never prevents listing, pruning or restoring other backups.
+ */
+export function listBackups(backupsDir: string): BackupInfo[] {
+  return backupNames(backupsDir).map((name) => {
     const path = join(backupsDir, name);
-    return { name, path, chatCount: countChats(path) };
+    let chatCount: number;
+    try {
+      chatCount = countChats(path);
+    } catch {
+      chatCount = -1;
+    }
+    return { name, path, chatCount };
   });
 }
 
 /** Deletes all but the `keep` newest backups; returns the removed names. */
 export function pruneBackups(backupsDir: string, keep = 20): string[] {
+  if (!Number.isInteger(keep) || keep < 1) throw new ChatsyncError(`Invalid number of backups to keep: ${keep}`, 1);
   const removed: string[] = [];
-  for (const b of listBackups(backupsDir).slice(keep)) {
-    rmSync(b.path, { recursive: true, force: true });
-    removed.push(b.name);
+  for (const name of backupNames(backupsDir).slice(keep)) {
+    rmSync(join(backupsDir, name), { recursive: true, force: true });
+    removed.push(name);
   }
   return removed;
 }
@@ -109,10 +127,10 @@ export function restoreBackup(o: {
   backupsDir: string;
   isAppRunning: () => boolean;
   now?: Date;
-}): { safetyBackup: string } {
+}): { safetyBackup: string | null; warning?: string } {
   if (o.isAppRunning()) throw new ChatsyncError("Quit Claude before restoring", 1);
-  const target = listBackups(o.backupsDir).find((b) => b.name === o.name);
-  if (!target) throw new ChatsyncError(`No such backup: ${o.name}`, 1);
+  if (!backupNames(o.backupsDir).includes(o.name)) throw new ChatsyncError(`No such backup: ${o.name}`, 1);
+  const source = join(o.backupsDir, o.name);
 
   const old = o.sessionsDir + OLD_SUFFIX;
   if (existsSync(old)) {
@@ -122,15 +140,26 @@ export function restoreBackup(o: {
   const hadSessions = isDir(o.sessionsDir);
   const safetyBackup = hadSessions
     ? createBackup({ sessionsDir: o.sessionsDir, backupsDir: o.backupsDir, ...(o.now ? { now: o.now } : {}) })
-    : "";
+    : null;
 
   if (hadSessions) renameSync(o.sessionsDir, old);
   try {
-    cpSync(target.path, o.sessionsDir, { recursive: true });
+    cpSync(source, o.sessionsDir, { recursive: true });
   } catch (err: unknown) {
-    rmSync(o.sessionsDir, { recursive: true, force: true });
-    if (hadSessions) renameSync(old, o.sessionsDir);
     const reason = err instanceof Error ? err.message : String(err);
+    try {
+      rmSync(o.sessionsDir, { recursive: true, force: true });
+      if (hadSessions) renameSync(old, o.sessionsDir);
+    } catch (rollbackErr: unknown) {
+      const rollbackReason = rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr);
+      const where = hadSessions
+        ? `your previous sessions are in ${old}` + (safetyBackup ? ` and in backup ${join(o.backupsDir, safetyBackup)}` : "")
+        : "there was no previous sessions folder";
+      throw new ChatsyncError(
+        `Restore failed (${reason}) and rolling back failed (${rollbackReason}); ${where}`,
+        1,
+      );
+    }
     throw new ChatsyncError(`Restore failed, sessions left unchanged: ${reason}`, 1);
   }
   if (hadSessions) {
@@ -138,7 +167,7 @@ export function restoreBackup(o: {
       rmSync(old, { recursive: true, force: true });
     } catch (err: unknown) {
       const reason = err instanceof Error ? err.message : String(err);
-      throw new ChatsyncError(`Restored, but could not remove ${old}: ${reason}`, 1);
+      return { safetyBackup, warning: `Restored, but could not remove the leftover folder ${old}: ${reason}` };
     }
   }
   return { safetyBackup };
