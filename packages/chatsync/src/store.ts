@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, type Stats } from "node:fs";
 import { join } from "node:path";
 import { ChatsyncError } from "./errors.js";
 import { sessionsDir } from "./paths.js";
@@ -27,18 +27,43 @@ function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** Runs a filesystem call, turning any failure into an exit-2 error that names the path. */
+function fsGuard<T>(path: string, fn: () => T): T {
+  try {
+    return fn();
+  } catch (err: unknown) {
+    throw new ChatsyncError(`Cannot access ${path}: ${describeError(err)}`, 2);
+  }
+}
+
+const listDir = (dir: string): string[] => fsGuard(dir, () => readdirSync(dir).sort());
+const statPath = (path: string): Stats => fsGuard(path, () => statSync(path));
+
 /** Names of UUID-named subfolders of `dir`. Dotfiles are skipped; anything else is an unrecognized layout. */
 function uuidFolders(dir: string): string[] {
   const out: string[] = [];
-  for (const name of readdirSync(dir).sort()) {
+  for (const name of listDir(dir)) {
     if (name.startsWith(".")) continue;
     const path = join(dir, name);
-    if (!UUID.test(name) || !statSync(path).isDirectory()) {
+    if (!UUID.test(name) || !statPath(path).isDirectory()) {
       throw new ChatsyncError(`Unrecognized item in the app's data folder: ${path} (expected a UUID-named folder)`, 2);
     }
     out.push(name);
   }
   return out;
+}
+
+/** Describes the first optional field that is present but has the wrong type, if any. */
+function badOptionalField(d: Record<string, unknown>): string | null {
+  if (d.title !== undefined && typeof d.title !== "string") return `"title" must be a string`;
+  if (d.isArchived !== undefined && typeof d.isArchived !== "boolean") return `"isArchived" must be a boolean`;
+  if (d.sshConfig !== undefined) {
+    if (!isRecord(d.sshConfig)) return `"sshConfig" must be an object`;
+    if (d.sshConfig.sshHost !== undefined && typeof d.sshConfig.sshHost !== "string") {
+      return `"sshConfig.sshHost" must be a string`;
+    }
+  }
+  return null;
 }
 
 function readEntry(file: string, accountId: string, orgId: string): Entry {
@@ -54,23 +79,27 @@ function readEntry(file: string, accountId: string, orgId: string): Entry {
       2,
     );
   }
+  const bad = badOptionalField(parsed);
+  if (bad) throw new ChatsyncError(`Unrecognized sidebar entry ${file}: ${bad}`, 2);
   return { accountId, orgId, file, data: parsed as EntryData };
 }
 
 /** Reads every `local_*.json` entry under `<appDir>/claude-code-sessions/<account>/<org>/`. */
 export function loadStore(appDir: string): Store {
   const root = sessionsDir(appDir);
-  if (!existsSync(root)) return { accounts: [] };
+  if (!existsSync(root) || !statPath(root).isDirectory()) {
+    throw new ChatsyncError(`Claude sessions folder not found: ${root}`, 2);
+  }
   const accounts: Store["accounts"] = [];
   for (const accountId of uuidFolders(root)) {
     const orgs: Store["accounts"][number]["orgs"] = [];
     for (const orgId of uuidFolders(join(root, accountId))) {
       const dir = join(root, accountId, orgId);
       const entries: Entry[] = [];
-      for (const name of readdirSync(dir).sort()) {
+      for (const name of listDir(dir)) {
         if (!ENTRY_FILE.test(name)) continue;
         const file = join(dir, name);
-        if (!statSync(file).isFile()) continue;
+        if (!statPath(file).isFile()) continue;
         entries.push(readEntry(file, accountId, orgId));
       }
       orgs.push({ id: orgId, dir, entries });

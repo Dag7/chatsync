@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { sessionsDir } from "./paths.js";
@@ -54,8 +54,32 @@ describe("loadStore", () => {
     expect(store.accounts[0]!.orgs[0]!.entries.map((e) => e.data.sessionId)).toEqual(["local_1"]);
   });
 
-  it("returns an empty store when there is no sessions folder", () => {
-    expect(loadStore(tmpDir())).toEqual({ accounts: [] });
+  it("missing sessions folder -> exit 2 naming the path", () => {
+    const appDir = tmpDir();
+    expect(() => loadStore(appDir)).toThrow(exit2(/claude-code-sessions/));
+  });
+
+  it("dangling symlink with a UUID name -> exit 2 naming the path", () => {
+    const appDir = makeAppDir(tmpDir(), { accounts: { [A]: { [ORG1]: [] } } });
+    symlinkSync(join(appDir, "nowhere"), join(sessionsDir(appDir), B));
+    expect(() => loadStore(appDir)).toThrow(exit2(new RegExp(B)));
+  });
+
+  it("dangling symlink entry file -> exit 2 naming the path", () => {
+    const appDir = makeAppDir(tmpDir(), { accounts: { [A]: { [ORG1]: [] } } });
+    symlinkSync(join(appDir, "nowhere"), join(sessionsDir(appDir), A, ORG1, "local_dangling.json"));
+    expect(() => loadStore(appDir)).toThrow(exit2(/local_dangling\.json/));
+  });
+
+  it("wrongly typed optional field -> exit 2 naming the file", () => {
+    const appDir = makeAppDir(tmpDir(), { accounts: { [A]: { [ORG1]: [] } } });
+    const bad: unknown[] = [{ title: 5 }, { isArchived: "yes" }, { sshConfig: "x" }, { sshConfig: { sshHost: 1 } }];
+    bad.forEach((extra, i) => {
+      const file = join(sessionsDir(appDir), A, ORG1, `local_bad${i}.json`);
+      writeFileSync(file, JSON.stringify({ sessionId: `local_bad${i}`, lastActivityAt: 1, ...(extra as object) }));
+      expect(() => loadStore(appDir)).toThrow(exit2(new RegExp(`local_bad${i}\\.json`)));
+      rmSync(file);
+    });
   });
 
   it("non-UUID folder -> exit 2", () => {
@@ -64,7 +88,13 @@ describe("loadStore", () => {
     expect(() => loadStore(appDir)).toThrow(exit2(/junk/));
   });
 
-  it("non-UUID org folder or stray file at account level -> exit 2", () => {
+  it("non-UUID folder at org level -> exit 2", () => {
+    const appDir = makeAppDir(tmpDir(), { accounts: { [A]: { [ORG1]: [] } } });
+    mkdirSync(join(sessionsDir(appDir), A, "junk-org"));
+    expect(() => loadStore(appDir)).toThrow(exit2(/junk-org/));
+  });
+
+  it("stray file at account level -> exit 2", () => {
     const appDir = makeAppDir(tmpDir(), { accounts: { [A]: { [ORG1]: [] } } });
     writeFileSync(join(sessionsDir(appDir), A, "stray.json"), "{}");
     expect(() => loadStore(appDir)).toThrow(exit2(/stray\.json/));
