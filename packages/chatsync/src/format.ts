@@ -1,5 +1,5 @@
 import { accountLabel, machineName, type ChatsyncConfig } from "./config.js";
-import type { Chat, Conflict, Plan, Write } from "./plan.js";
+import type { BehindChat, Chat, Conflict, Plan, Write } from "./plan.js";
 
 export type OutputCtx = { activeAccountId: string; cfg: ChatsyncConfig; sshNames: Record<string, string> };
 
@@ -8,6 +8,8 @@ export type JsonOutput = {
   chats: { sessionId: string; title: string; machine: string; accounts: string[]; newestAccount: string }[];
   writes: { sessionId: string; accountId: string; orgId: string; kind: string }[];
   conflicts: Conflict[];
+  activeBehind: BehindChat[];
+  skippedAccounts: string[];
 };
 
 const byText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
@@ -70,7 +72,32 @@ export function formatPlan(plan: Plan, ctx: OutputCtx): string {
     const labels = c.accountIds.map((id) => accountLabel(id, ctx.cfg)).join(", ");
     lines.push(`conflict: "${c.title}" changed in ${labels}`);
   }
+  for (const id of plan.skippedAccounts) lines.push(`account ${accountLabel(id, ctx.cfg)} has no org folder; skipped`);
+  const behind = plan.activeBehind.length;
+  if (behind > 0) {
+    lines.push(
+      `${behind} ${behind === 1 ? "chat is" : "chats are"} missing or older in the signed-in account. ` +
+        "Switch to an account that has them, run chatsync sync, then switch back.",
+    );
+  }
   return lines.join("\n");
+}
+
+/** Per target account counts, e.g. `copy 9 to work, 8 to personal · update 1 to work`. */
+export function formatBreakdown(plan: Plan, ctx: OutputCtx): string {
+  const parts: string[] = [];
+  for (const kind of ["copy", "update"] as const) {
+    const counts = new Map<string, number>();
+    for (const w of plan.writes) {
+      if (w.kind !== kind) continue;
+      const label = accountLabel(w.accountId, ctx.cfg);
+      counts.set(label, (counts.get(label) ?? 0) + 1);
+    }
+    if (counts.size === 0) continue;
+    const targets = [...counts.keys()].sort(byText).map((label) => `${counts.get(label)} to ${label}`);
+    parts.push(`${kind} ${targets.join(", ")}`);
+  }
+  return parts.join(" · ");
 }
 
 export function sortPrompt(plan: Plan, ctx: OutputCtx): string {
@@ -102,5 +129,7 @@ export function toJson(plan: Plan, ctx: OutputCtx): JsonOutput {
     })),
     writes: plan.writes.map((w) => ({ sessionId: w.sessionId, accountId: w.accountId, orgId: w.orgId, kind: w.kind })),
     conflicts: plan.conflicts,
+    activeBehind: plan.activeBehind,
+    skippedAccounts: plan.skippedAccounts,
   };
 }

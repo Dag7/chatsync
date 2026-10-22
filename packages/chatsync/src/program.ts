@@ -6,7 +6,7 @@ import { applyPlan } from "./apply.js";
 import { listBackups, restoreBackup } from "./backup.js";
 import { accountLabel, loadConfig, saveConfig, type ChatsyncConfig } from "./config.js";
 import { ChatsyncError } from "./errors.js";
-import { formatPlan, formatStatus, toJson, type OutputCtx } from "./format.js";
+import { formatBreakdown, formatPlan, formatStatus, toJson, type OutputCtx } from "./format.js";
 import { appDataDir, chatsyncHome, sessionsDir } from "./paths.js";
 import { buildPlan, type Plan } from "./plan.js";
 import { inquirerPrompter, type Prompter } from "./prompter.js";
@@ -36,6 +36,14 @@ function packageVersion(): string {
 
 function defaultIsAppRunning(): boolean {
   return spawnSync("pgrep", ["-x", "Claude"]).status === 0;
+}
+
+/** Identifies what a plan would write, so a re-plan can be compared with what the user confirmed. */
+function writeSignature(plan: Plan): string {
+  return plan.writes
+    .map((w) => [w.sessionId, w.accountId, w.orgId, w.kind, w.data.lastActivityAt].join("|"))
+    .sort()
+    .join("\n");
 }
 
 const stripNewline = (t: string): string => t.replace(/\n$/, "");
@@ -90,23 +98,41 @@ export function buildProgram(deps: ProgramDeps = {}): Command {
     if (plan.writes.length === 0) {
       // Nothing to write; still record the in-sync state so later conflicts can be detected.
       try {
-        applyPlan(plan, { sessionsDir: sessionsDir(app), home });
+        applyPlan(plan, { sessionsDir: sessionsDir(app), home, activeAccountId: ctx.activeAccountId });
       } catch (err: unknown) {
         errOut(`Could not record sync state: ${err instanceof Error ? err.message : String(err)}`);
       }
-      out(asJson ? json(toJson(plan, ctx)) : "Already in sync");
+      if (asJson) out(json(toJson(plan, ctx)));
+      else if (plan.activeBehind.length === 0) out("Already in sync");
       return;
     }
 
+    let current = { plan, ctx };
     if (!opts.yes) {
-      if (!isTTY || asJson) throw new ChatsyncError("Not an interactive terminal: pass -y to apply", 1);
+      if (asJson) throw new ChatsyncError("--json never prompts: pass -y to apply", 1);
+      if (!isTTY) throw new ChatsyncError("Not an interactive terminal: pass -y to apply", 1);
+      out(formatBreakdown(plan, ctx));
       if (!(await prompts().confirm("Proceed?"))) {
         out("Cancelled");
         return;
       }
+      // The user may have switched accounts or the app may have written files while the prompt was open.
+      const again = load();
+      if (
+        again.ctx.activeAccountId !== ctx.activeAccountId ||
+        writeSignature(again.plan) !== writeSignature(plan)
+      ) {
+        throw new ChatsyncError("The signed-in account changed while waiting; run chatsync sync again", 2);
+      }
+      current = { plan: again.plan, ctx: again.ctx };
     }
 
-    const res = applyPlan(plan, { sessionsDir: sessionsDir(app), home, ...nowOpt() });
+    const res = applyPlan(current.plan, {
+      sessionsDir: sessionsDir(app),
+      home,
+      activeAccountId: current.ctx.activeAccountId,
+      ...nowOpt(),
+    });
     const backupPath = res.backup === null ? null : join(home, "backups", res.backup);
     if (asJson) {
       out(json({ ...toJson(plan, ctx), result: { backup: backupPath, written: res.written, pruned: res.pruned } }));
@@ -130,7 +156,7 @@ export function buildProgram(deps: ProgramDeps = {}): Command {
     for (const b of list) out(backupLabel(b));
   }
 
-  async function restore(name: string | undefined): Promise<void> {
+  async function restore(name: string | undefined, yes = false): Promise<void> {
     const home = homeDir();
     const backupsDir = join(home, "backups");
     if (isAppRunning()) throw new ChatsyncError("Quit Claude before restoring", 1);
@@ -148,7 +174,8 @@ export function buildProgram(deps: ProgramDeps = {}): Command {
         list.map((b) => ({ name: backupLabel(b), value: b.name })),
       );
     }
-    if (isTTY) {
+    if (!isTTY && !yes) throw new ChatsyncError("Not an interactive terminal: pass -y to restore", 1);
+    if (isTTY && !yes) {
       const ok = await prompts().confirm(`Replace your Claude sessions with backup ${target}? Current sessions are backed up first.`);
       if (!ok) {
         out("Cancelled");
@@ -280,7 +307,8 @@ export function buildProgram(deps: ProgramDeps = {}): Command {
     .command("restore")
     .description("restore the sessions folder from a backup (Claude must be quit)")
     .argument("[name]", "backup name; omit to choose")
-    .action((name: string | undefined) => restore(name));
+    .option("-y, --yes", "restore without asking")
+    .action((name: string | undefined, opts: { yes?: boolean }) => restore(name, opts.yes === true));
 
   program
     .command("accounts")

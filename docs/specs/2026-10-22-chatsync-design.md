@@ -71,7 +71,7 @@ These are internal, undocumented formats. chatsync must fail safe if they change
 
 - Before any write (`sync`, `restore`), copy the whole `claude-code-sessions` folder to
   `~/.chatsync/backups/<YYYY-MM-DD_HHMMSS>/`.
-- Keep the newest 20 backups; older ones are pruned after a successful new backup.
+- Keep the newest 20 backups plus the single oldest (the pre-chatsync copy); older ones are pruned after a successful new backup.
 - `restore` refuses to run while the Claude app is running (`pgrep -x Claude`), backs up
   the current state first, then replaces the folder with the chosen backup.
 

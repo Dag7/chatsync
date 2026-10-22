@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { Prompter } from "./prompter.js";
@@ -134,8 +134,16 @@ describe("chatsync CLI", () => {
     expect(r.out).toContain("1");
   });
 
-  it("sync reports already in sync when nothing to write", async () => {
-    const fx = fixture();
+  it("sync reports already in sync when nothing to write and the signed-in account is current", async () => {
+    const root = tmpDir();
+    const appDir = makeAppDir(root, {
+      active: A,
+      accounts: {
+        [A]: { [ORG1]: [entry({ id: ID1, at: 2000, title: "Alpha chat" }), entry({ id: ID2, at: 1000, title: "Beta chat" })] },
+        [B]: { [ORG1]: [entry({ id: ID2, at: 500, title: "Beta chat" })] },
+      },
+    });
+    const fx: Fixture = { root, appDir, home: join(root, "chatsync-home"), sessions: join(appDir, "claude-code-sessions") };
     await run(fx, ["sync", "-y"]);
     const r = await run(fx, ["sync", "-y"]);
     expect(r.code).toBe(0);
@@ -167,7 +175,7 @@ describe("chatsync CLI", () => {
     expect(existsSync(bEntry(fx))).toBe(false);
   });
 
-  it("sync with a missing sessions folder exits 2 with a clean message", async () => {
+  it("status with a missing sessions folder exits 2 with a clean message", async () => {
     const fx = fixture();
     const r = await run(fx, ["status"], { env: { CHATSYNC_APP_DIR: join(fx.root, "nope"), CHATSYNC_HOME: fx.home } });
     expect(r.code).toBe(2);
@@ -197,8 +205,31 @@ describe("chatsync CLI", () => {
     expect(listed.code).toBe(0);
     expect(listed.out).toContain(name as string);
 
-    const r = await run(fx, ["restore", name as string]);
+    const r = await run(fx, ["restore", name as string, "-y"]);
     expect(r.code).toBe(0);
+    expect(existsSync(bEntry(fx))).toBe(false);
+  });
+
+  it("restore <name> without TTY and without -y exits 1 and changes nothing", async () => {
+    const fx = fixture();
+    await run(fx, ["sync", "-y"]);
+    const [name] = readdirSync(join(fx.home, "backups"));
+    const before = readdirSync(join(fx.home, "backups"));
+    const r = await run(fx, ["restore", name as string]);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("pass -y to restore");
+    expect(existsSync(bEntry(fx))).toBe(true);
+    expect(readdirSync(join(fx.home, "backups"))).toEqual(before);
+  });
+
+  it("restore <name> -y with a TTY skips the confirm", async () => {
+    const fx = fixture();
+    await run(fx, ["sync", "-y"]);
+    const [name] = readdirSync(join(fx.home, "backups"));
+    const prompter = fakePrompter();
+    const r = await run(fx, ["restore", name as string, "-y"], { isTTY: true, prompter });
+    expect(r.code).toBe(0);
+    expect(prompter.calls).toEqual([]);
     expect(existsSync(bEntry(fx))).toBe(false);
   });
 
@@ -211,6 +242,23 @@ describe("chatsync CLI", () => {
     expect(r.code).toBe(0);
     expect(prompter.calls).toHaveLength(2);
     expect(existsSync(bEntry(fx))).toBe(false);
+  });
+
+  it("sync --json without -y says --json never prompts, even on a TTY", async () => {
+    const fx = fixture();
+    const prompter = fakePrompter();
+    const r = await run(fx, ["sync", "--json"], { isTTY: true, prompter });
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("--json never prompts: pass -y to apply");
+    expect(prompter.calls).toEqual([]);
+    expect(existsSync(bEntry(fx))).toBe(false);
+  });
+
+  it("sync prints a per-account breakdown before asking to proceed", async () => {
+    const fx = fixture();
+    const prompter = fakePrompter({ confirm: [false] });
+    const r = await run(fx, ["sync"], { isTTY: true, prompter });
+    expect(r.out).toContain("copy 1 to bbbbbbbb");
   });
 
   it("accounts saves a nickname and keeps current on blank", async () => {
@@ -261,5 +309,96 @@ describe("chatsync CLI", () => {
     const r = await run(fx, ["bogus"]);
     expect(r.code).toBe(1);
     expect(r.err).toContain("bogus");
+  });
+});
+
+/** A is signed in and holds X at 10; B holds X at 20 plus Y that A lacks. Nothing can be written. */
+function behindFixture(): Fixture {
+  const root = tmpDir();
+  const appDir = makeAppDir(root, {
+    active: A,
+    accounts: {
+      [A]: { [ORG1]: [entry({ id: ID1, at: 10, title: "X" })] },
+      [B]: { [ORG1]: [entry({ id: ID1, at: 20, title: "X" }), entry({ id: ID2, at: 5, title: "Y" })] },
+    },
+  });
+  return { root, appDir, home: join(root, "chatsync-home"), sessions: join(appDir, "claude-code-sessions") };
+}
+
+const BEHIND = "2 chats are missing or older in the signed-in account.";
+
+describe("signed-in account behind", () => {
+  it("status says so instead of looking in sync", async () => {
+    const fx = behindFixture();
+    const r = await run(fx, ["status"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("copy 0 · update 0 · unchanged 2");
+    expect(r.out).toContain(BEHIND);
+    expect(r.out).toContain("Switch to an account that has them, run chatsync sync, then switch back.");
+  });
+
+  it("sync -y prints the plan and the line, exits 0, never says Already in sync, writes nothing", async () => {
+    const fx = behindFixture();
+    const r = await run(fx, ["sync", "-y"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(BEHIND);
+    expect(r.out).not.toContain("Already in sync");
+    expect(existsSync(join(fx.home, "backups"))).toBe(false);
+  });
+
+  it("sync --json -y includes activeBehind", async () => {
+    const fx = behindFixture();
+    const r = await run(fx, ["sync", "-y", "--json"]);
+    expect(r.code).toBe(0);
+    const parsed = JSON.parse(r.out) as { activeBehind: { sessionId: string; reason: string }[] };
+    expect(parsed.activeBehind.map((b) => [b.sessionId, b.reason])).toEqual([
+      [ID1, "older"],
+      [ID2, "missing"],
+    ]);
+  });
+});
+
+describe("sync while the confirm prompt is open", () => {
+  /** A prompter whose confirm runs `during` first, then answers yes. */
+  function prompterThatActs(during: () => void): Prompter {
+    return {
+      async select<T extends string>(): Promise<T> {
+        throw new Error("unexpected select");
+      },
+      async confirm(): Promise<boolean> {
+        during();
+        return true;
+      },
+      async input(): Promise<string> {
+        throw new Error("unexpected input");
+      },
+    };
+  }
+
+  it("stops with exit 2 and writes nothing when the signed-in account changed", async () => {
+    const fx = fixture();
+    const prompter = prompterThatActs(() => {
+      writeFileSync(join(fx.appDir, "config.json"), JSON.stringify({ lastKnownAccountUuid: B }));
+    });
+    const r = await run(fx, ["sync"], { isTTY: true, prompter });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain("The signed-in account changed while waiting; run chatsync sync again");
+    expect(existsSync(bEntry(fx))).toBe(false);
+    expect(existsSync(join(fx.home, "backups"))).toBe(false);
+  });
+
+  it("stops with exit 2 and writes nothing when the write set changed", async () => {
+    const fx = fixture();
+    const prompter = prompterThatActs(() => {
+      // B gains the chat that was about to be copied, so the shown plan is stale.
+      writeFileSync(
+        join(fx.sessions, B, ORG1, `${ID1}.json`),
+        JSON.stringify(entry({ id: ID1, at: 2000, title: "Alpha chat" })),
+      );
+    });
+    const r = await run(fx, ["sync"], { isTTY: true, prompter });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain("changed while waiting");
+    expect(existsSync(join(fx.home, "backups"))).toBe(false);
   });
 });

@@ -1,6 +1,6 @@
 # chatsync
 
-Copy Claude desktop Code-tab sidebar entries between the accounts you are signed in with on one Mac, so every account lists every chat.
+Copy Claude desktop Code-tab sidebar entries between the accounts you are signed in with on one Mac, so every account can list every chat. The account you are signed into is never written: it receives the other accounts' chats the next time you run `chatsync sync` from a different account.
 
 ## The problem
 
@@ -35,7 +35,9 @@ npx chatsync
 
 **Run `chatsync sync` before you switch accounts.**
 
-The account you are signed into is never written to, because the running app holds its entries in memory and could overwrite them. So the account you are about to leave is the one that pushes its latest progress to all the others. Then switch accounts in Claude, and the chats are there.
+The account you are signed into is never written to, because the running app holds its entries in memory and could overwrite them. So the account you are about to leave is the one that pushes its latest progress to all the others. Then switch accounts in Claude, and the chats should appear in the other account's sidebar. The signed-in account itself only catches up the next time you run `chatsync sync` while signed into a different account. When the signed-in account is missing chats or holds older copies, `status` and `sync` say so.
+
+The first time, check the result in the app: chatsync relies on app files that Anthropic does not document (see the last section).
 
 ```sh
 chatsync sync --dry-run   # see what would change; writes nothing
@@ -48,9 +50,9 @@ chatsync sync             # show the plan, ask, back up, write
 |---|---|
 | `chatsync` | Interactive menu (in a terminal): Status, Sync, Backups / restore, Accounts, Quit. Outside a terminal it prints help. |
 | `chatsync status [--json]` | Shows the signed-in account, then every chat grouped by machine: which accounts have it, which copy is newest (marked `*`), and what a sync would do. Also prints the sections prompt (see below). Changes nothing. |
-| `chatsync sync [--dry-run] [-y] [--json]` | Prints the plan and counts (copy, update, unchanged, conflicts). Without `--dry-run` it asks for confirmation, backs up, then writes. `-y` skips the question. `--json` prints machine-readable output. |
+| `chatsync sync [--dry-run] [-y] [--json]` | Prints the plan and counts (copy, update, unchanged, conflicts). Without `--dry-run` it asks for confirmation, backs up, then writes. `-y` skips the question. `--json` prints machine-readable output and never prompts, so applying needs `-y`. |
 | `chatsync backups` | Lists backups with their chat counts. |
-| `chatsync restore [name]` | Replaces the Claude sessions folder with a backup. Pick one from a menu or pass its name. Claude must be quit. |
+| `chatsync restore [name]` | Replaces the Claude sessions folder with a backup. Pick one from a menu or pass its name. Claude must be quit. Asks for confirmation; `-y` skips the question, and is required when there is no terminal. |
 | `chatsync accounts` | Lists the accounts with a few recent chat titles each, and lets you give each a nickname (stored in `~/.chatsync/config.json`). |
 
 Without a terminal (or with `--json`), chatsync never prompts: `sync` then needs `-y` to write.
@@ -59,7 +61,7 @@ Exit codes: `0` ok, `1` error, `2` unsupported platform or data that chatsync do
 
 ## Safety
 
-- **Backup before every write.** The whole sessions folder is copied to `~/.chatsync/backups/<YYYY-MM-DD_HHMMSS>/` before `sync` or `restore` changes anything. The newest 20 backups are kept.
+- **Backup before every write.** The whole sessions folder is copied to `~/.chatsync/backups/<YYYY-MM-DD_HHMMSS>/` before `sync` or `restore` changes anything. The newest 20 backups are kept, plus the oldest one (the copy from before chatsync first wrote anything).
 - **Never writes to the signed-in account.**
 - **Never deletes** a sidebar entry.
 - **Atomic writes.** Each entry is written to a temporary file and renamed into place.
@@ -68,7 +70,20 @@ Exit codes: `0` ok, `1` error, `2` unsupported platform or data that chatsync do
 - **Restore needs Claude closed**, and takes a safety backup of the current state first.
 - Other files in the account folders (such as `scheduled-tasks.json`) are left alone.
 
-Local state lives in `~/.chatsync/`: `backups/`, `state.json` (what was seen at the last sync, used only to detect conflicts; safe to delete) and `config.json` (nicknames).
+Local state lives in `~/.chatsync/`: `backups/`, `state.json` (what was seen at the last sync, used only to detect conflicts; safe to delete) and `config.json` (nicknames and machine names).
+
+### Naming machines
+
+Machine names shown in `status` come from the app's SSH settings. To override one, add a `machines` map in `~/.chatsync/config.json` from the ssh host to the display name you want:
+
+```json
+{
+  "accounts": { "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": "work" },
+  "machines": { "ws-gad-link": "link" }
+}
+```
+
+`accounts` holds the nicknames set by `chatsync accounts`.
 
 ## Sidebar sections by machine
 

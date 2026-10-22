@@ -68,12 +68,23 @@ function stateAfter(plan: Plan): SyncState {
 }
 
 /**
- * Applies a plan: validate every target, back up the sessions folder (a failure aborts before
+ * Applies a plan: refuse any write to the signed-in account, validate every target, back up the sessions folder (a failure aborts before
  * anything is written), write each entry atomically, record the new sync state, prune old backups.
  * Failures to save state or prune after the entries are written never fail the sync; they are
  * returned as `warning`.
  */
-export function applyPlan(plan: Plan, o: { sessionsDir: string; home: string; now?: Date }): ApplyResult {
+export function applyPlan(
+  plan: Plan,
+  o: { sessionsDir: string; home: string; activeAccountId: string; now?: Date },
+): ApplyResult {
+  // The running app owns the signed-in account's files; refuse before anything is touched.
+  const forbidden = plan.writes.find((w) => w.accountId === o.activeAccountId);
+  if (forbidden) {
+    throw new ChatsyncError(
+      `Refusing to write chat "${forbidden.sessionId}" to the signed-in account ${forbidden.accountId.slice(0, 8)}; nothing was written`,
+      2,
+    );
+  }
   const state = stateAfter(plan);
   if (plan.writes.length === 0) {
     saveState(o.home, state);

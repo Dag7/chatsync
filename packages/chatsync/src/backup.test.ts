@@ -1,5 +1,5 @@
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createBackup, listBackups, pruneBackups, restoreBackup } from "./backup.js";
 import { ChatsyncError } from "./errors.js";
@@ -94,13 +94,21 @@ describe("listBackups", () => {
 });
 
 describe("pruneBackups", () => {
-  it("keeps 20 newest", () => {
+  it("keeps the 20 newest plus the oldest", () => {
     const { backups } = setup();
-    for (let i = 1; i <= 22; i++) fakeBackup(backups, `2026-10-${String(i).padStart(2, "0")}_000000`);
+    for (let i = 1; i <= 23; i++) fakeBackup(backups, `2026-10-${String(i).padStart(2, "0")}_000000`);
     const removed = pruneBackups(backups);
-    expect(removed.sort()).toEqual(["2026-10-01_000000", "2026-10-02_000000"]);
-    expect(listBackups(backups)).toHaveLength(20);
-    expect(existsSync(join(backups, "2026-10-01_000000"))).toBe(false);
+    expect(removed.sort()).toEqual(["2026-10-02_000000", "2026-10-03_000000"]);
+    expect(listBackups(backups)).toHaveLength(21);
+    expect(existsSync(join(backups, "2026-10-01_000000"))).toBe(true);
+    expect(existsSync(join(backups, "2026-10-04_000000"))).toBe(true);
+  });
+
+  it("never deletes the oldest backup, even with keep 1", () => {
+    const { backups } = setup();
+    for (const n of ["2026-10-01_000000", "2026-10-02_000000", "2026-10-03_000000"]) fakeBackup(backups, n);
+    expect(pruneBackups(backups, 1)).toEqual(["2026-10-02_000000"]);
+    expect(listBackups(backups).map((b) => b.name)).toEqual(["2026-10-03_000000", "2026-10-01_000000"]);
   });
 
   it("never deletes non-backup directories", () => {
@@ -108,7 +116,7 @@ describe("pruneBackups", () => {
     for (let i = 1; i <= 22; i++) fakeBackup(backups, `2026-10-${String(i).padStart(2, "0")}_000000`);
     fakeBackup(backups, ".git");
     fakeBackup(backups, "archive-2025");
-    expect(pruneBackups(backups)).toHaveLength(2);
+    expect(pruneBackups(backups)).toHaveLength(1);
     expect(existsSync(join(backups, ".git"))).toBe(true);
     expect(existsSync(join(backups, "archive-2025"))).toBe(true);
   });
@@ -118,8 +126,12 @@ describe("pruneBackups", () => {
     for (const n of ["2026-10-22_100000", "2026-10-22_100000-2", "2026-10-22_100000-10", "2026-10-21_100000"]) {
       fakeBackup(backups, n);
     }
-    expect(pruneBackups(backups, 2)).toEqual(["2026-10-22_100000", "2026-10-21_100000"]);
-    expect(listBackups(backups).map((b) => b.name)).toEqual(["2026-10-22_100000-10", "2026-10-22_100000-2"]);
+    expect(pruneBackups(backups, 2)).toEqual(["2026-10-22_100000"]);
+    expect(listBackups(backups).map((b) => b.name)).toEqual([
+      "2026-10-22_100000-10",
+      "2026-10-22_100000-2",
+      "2026-10-21_100000",
+    ]);
   });
 
   it("rejects an invalid keep", () => {
@@ -134,6 +146,7 @@ describe("pruneBackups", () => {
     fakeBackup(backups, "2026-10-23_000000", 1);
     fakeBackup(backups, "2026-10-22_000000", 1);
     fakeBackup(backups, "2026-10-21_000000", 1);
+    fakeBackup(backups, "2026-10-20_000000", 1);
     const locked = join(backups, "2026-10-22_000000", "acct");
     chmodSync(locked, 0o000);
     try {
@@ -242,6 +255,23 @@ describe("restoreBackup", () => {
       ).toThrow();
     } finally {
       chmodSync(unreadable, 0o644);
+    }
+    expect(readFileSync(file(sessions), "utf8")).toBe("changed");
+    expect(existsSync(`${sessions}.chatsync-old`)).toBe(false);
+  });
+
+  it("reports a failure to move the current sessions folder aside, leaving it unchanged", () => {
+    const { sessions, backups } = setup();
+    const name = createBackup({ sessionsDir: sessions, backupsDir: backups, now: new Date(2026, 0, 1) });
+    writeFileSync(file(sessions), "changed");
+    const parent = dirname(sessions);
+    chmodSync(parent, 0o555);
+    try {
+      expect(() =>
+        restoreBackup({ name, sessionsDir: sessions, backupsDir: backups, isAppRunning: () => false }),
+      ).toThrow(expect.objectContaining({ name: "ChatsyncError", exitCode: 1, message: expect.stringContaining("left unchanged") }));
+    } finally {
+      chmodSync(parent, 0o755);
     }
     expect(readFileSync(file(sessions), "utf8")).toBe("changed");
     expect(existsSync(`${sessions}.chatsync-old`)).toBe(false);

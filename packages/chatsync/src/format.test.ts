@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { accountLabel, loadConfig, machineName, saveConfig, type ChatsyncConfig } from "./config.js";
 import { ChatsyncError } from "./errors.js";
-import { formatPlan, formatStatus, sortPrompt, toJson, type OutputCtx } from "./format.js";
+import { formatBreakdown, formatPlan, formatStatus, sortPrompt, toJson, type OutputCtx } from "./format.js";
 import { buildPlan } from "./plan.js";
 import type { Entry, EntryData, Store } from "./store.js";
 import { A, B, C, entry, ORG1, ORG2, tmpDir } from "./test-helpers.js";
@@ -137,6 +137,57 @@ describe("formatPlan", () => {
     expect(lines[0]).toBe("copy 0 · update 1 · unchanged 0 · conflicts 1");
     expect(lines).toHaveLength(2);
     expect(lines[1]).toBe('conflict: "Both" changed in home, work');
+  });
+});
+
+describe("active account behind and skipped accounts", () => {
+  const BEHIND_LINE =
+    "chats are missing or older in the signed-in account. Switch to an account that has them, run chatsync sync, then switch back.";
+  const behindPlan = () =>
+    plan({
+      [A]: [entry({ id: "x", at: 10, title: "X" })],
+      [B]: [entry({ id: "x", at: 20, title: "X" }), entry({ id: "y", at: 5, title: "Y" })],
+    });
+
+  it("formatPlan and formatStatus print the behind line", () => {
+    const p = behindPlan();
+    expect(formatPlan(p, ctx).split("\n")).toEqual([
+      "copy 0 · update 0 · unchanged 2 · conflicts 0",
+      `2 ${BEHIND_LINE}`,
+    ]);
+    expect(formatStatus(p, ctx)).toContain(`2 ${BEHIND_LINE}`);
+  });
+
+  it("uses the singular for one chat and prints nothing when none are behind", () => {
+    const one = plan({ [A]: [entry({ id: "x", at: 10 })], [B]: [entry({ id: "x", at: 20 })] });
+    expect(formatPlan(one, ctx)).toContain("1 chat is missing or older in the signed-in account.");
+    expect(formatPlan(fixturePlan(), ctx)).not.toContain("signed-in account");
+  });
+
+  it("toJson includes activeBehind and skippedAccounts", () => {
+    const store = makeStore({ [A]: [entry({ id: "x", at: 10 })], [B]: [entry({ id: "x", at: 20 })] });
+    store.accounts.push({ id: C, orgs: [] });
+    const json = toJson(buildPlan({ store, activeAccountId: A, state: { sessions: {} } }), ctx);
+    expect(json.activeBehind).toEqual([{ sessionId: "x", title: "x", reason: "older" }]);
+    expect(json.skippedAccounts).toEqual([C]);
+  });
+
+  it("prints a line for each skipped account", () => {
+    const store = makeStore({ [A]: [entry({ id: "x", at: 10 })] });
+    store.accounts.push({ id: B, orgs: [] });
+    const out = formatPlan(buildPlan({ store, activeAccountId: A, state: { sessions: {} } }), ctx);
+    expect(out).toContain("account work has no org folder; skipped");
+  });
+});
+
+describe("formatBreakdown", () => {
+  it("counts copies and updates per target account", () => {
+    const p = plan({
+      [A]: [entry({ id: "s1", at: 10 }), entry({ id: "s2", at: 20 }), entry({ id: "s3", at: 30 })],
+      [B]: [entry({ id: "s2", at: 5 })],
+      [C]: [],
+    });
+    expect(formatBreakdown(p, ctx)).toBe("copy 3 to cccccccc, 2 to work · update 1 to work");
   });
 });
 

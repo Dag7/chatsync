@@ -111,11 +111,15 @@ export function listBackups(backupsDir: string): BackupInfo[] {
   });
 }
 
-/** Deletes all but the `keep` newest backups; returns the removed names. */
+/**
+ * Deletes all but the `keep` newest backups and the single oldest one (the copy from before
+ * chatsync first wrote anything); returns the removed names.
+ */
 export function pruneBackups(backupsDir: string, keep = 20): string[] {
   if (!Number.isInteger(keep) || keep < 1) throw new ChatsyncError(`Invalid number of backups to keep: ${keep}`, 1);
   const removed: string[] = [];
-  for (const name of backupNames(backupsDir).slice(keep)) {
+  const names = backupNames(backupsDir);
+  for (const name of names.slice(keep, names.length - 1)) {
     rmSync(join(backupsDir, name), { recursive: true, force: true });
     removed.push(name);
   }
@@ -147,7 +151,14 @@ export function restoreBackup(o: {
     ? createBackup({ sessionsDir: o.sessionsDir, backupsDir: o.backupsDir, ...(o.now ? { now: o.now } : {}) })
     : null;
 
-  if (hadSessions) renameSync(o.sessionsDir, old);
+  if (hadSessions) {
+    try {
+      renameSync(o.sessionsDir, old);
+    } catch (err: unknown) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new ChatsyncError(`Restore failed, sessions left unchanged: could not move ${o.sessionsDir} aside: ${reason}`, 1);
+    }
+  }
   try {
     cpSync(source, o.sessionsDir, { recursive: true });
   } catch (err: unknown) {

@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { ChatsyncError } from "./errors.js";
 import { buildPlan, type SyncState } from "./plan.js";
 import type { Entry, EntryData, Store } from "./store.js";
 import { A, B, C, entry, ORG1, ORG2 } from "./test-helpers.js";
@@ -206,18 +205,46 @@ describe("buildPlan", () => {
     expect(buildPlan({ store, activeAccountId: C, state: noState }).chats[0]?.newest.accountId).toBe(A);
   });
 
-  it("throws exit 2 for a null or unknown active account", () => {
+  it("throws exit 2 for a null active account", () => {
     const store = makeStore({ [A]: { [ORG1]: [] } });
-    for (const activeAccountId of [null, C]) {
-      let caught: unknown;
-      try {
-        buildPlan({ store, activeAccountId, state: noState });
-      } catch (err: unknown) {
-        caught = err;
-      }
-      expect(caught).toBeInstanceOf(ChatsyncError);
-      expect((caught as ChatsyncError).exitCode).toBe(2);
-      expect((caught as ChatsyncError).message).toMatch(/Cannot tell which account is active in Claude/);
-    }
+    const run = () => buildPlan({ store, activeAccountId: null, state: noState });
+    expect(run).toThrow(expect.objectContaining({ name: "ChatsyncError", exitCode: 2 }));
+    expect(run).toThrow(/Cannot tell which account is active in Claude/);
+  });
+
+  it("explains that a signed-in account without a sessions folder has no Code chats yet", () => {
+    const store = makeStore({ [A]: { [ORG1]: [] } });
+    const run = () => buildPlan({ store, activeAccountId: C, state: noState });
+    expect(run).toThrow(expect.objectContaining({ name: "ChatsyncError", exitCode: 2 }));
+    expect(run).toThrow("Signed-in account cccccccc has no Code chats yet; start one chat under it, then run chatsync again.");
+  });
+
+  it("reports chats the signed-in account is missing or holds an older copy of", () => {
+    const store = makeStore({
+      [A]: { [ORG1]: [entry({ id: "x", at: 10, title: "X" })] },
+      [B]: { [ORG1]: [entry({ id: "x", at: 20, title: "X" }), entry({ id: "y", at: 5, title: "Y" })] },
+    });
+    const plan = buildPlan({ store, activeAccountId: A, state: noState });
+    expect(plan.writes).toEqual([]);
+    expect(plan.unchanged).toBe(2);
+    expect(plan.activeBehind).toEqual([
+      { sessionId: "x", title: "X", reason: "older" },
+      { sessionId: "y", title: "Y", reason: "missing" },
+    ]);
+  });
+
+  it("has nothing behind when the signed-in account holds the newest copies", () => {
+    const store = makeStore({
+      [A]: { [ORG1]: [entry({ id: "x", at: 20 })] },
+      [B]: { [ORG1]: [entry({ id: "x", at: 20 })] },
+    });
+    expect(buildPlan({ store, activeAccountId: A, state: noState }).activeBehind).toEqual([]);
+  });
+
+  it("lists inactive accounts without an org folder as skipped", () => {
+    const store = makeStore({ [A]: { [ORG1]: [entry({ id: "s1", at: 100 })] }, [B]: {}, [C]: { [ORG1]: [] } });
+    const plan = buildPlan({ store, activeAccountId: A, state: noState });
+    expect(plan.skippedAccounts).toEqual([B]);
+    expect(plan.writes.map((w) => w.accountId)).toEqual([C]);
   });
 });

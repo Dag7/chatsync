@@ -61,7 +61,7 @@ function allFiles(dir: string): string[] {
 describe("applyPlan", () => {
   it("applies copy and update and records state", () => {
     const { appDir, sessions, home } = setup();
-    const result = applyPlan(plan(appDir), { sessionsDir: sessions, home, now: NOW });
+    const result = applyPlan(plan(appDir), { sessionsDir: sessions, activeAccountId: A, home, now: NOW });
     expect(result.written).toBe(2);
     expect(result.backup).toBe("2026-10-22_153005");
     expect(existsSync(join(home, "backups", result.backup as string, B, ORG1, `${ID2}.json`))).toBe(true);
@@ -88,7 +88,7 @@ describe("applyPlan", () => {
       },
     });
     const home = join(root, "home");
-    const result = applyPlan(plan(appDir), { sessionsDir: sessionsDir(appDir), home });
+    const result = applyPlan(plan(appDir), { sessionsDir: sessionsDir(appDir), activeAccountId: A, home });
     expect(result).toEqual({ backup: null, written: 0, pruned: [] });
     expect(existsSync(join(home, "backups"))).toBe(false);
     expect(loadState(home)).toEqual({ sessions: { [ID1]: { [A]: 5, [B]: 5 } } });
@@ -101,7 +101,7 @@ describe("applyPlan", () => {
     // A file where the backups folder should be makes createBackup fail.
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, "backups"), "not a folder");
-    expect(() => applyPlan(p, { sessionsDir: sessions, home, now: NOW })).toThrow(ChatsyncError);
+    expect(() => applyPlan(p, { sessionsDir: sessions, activeAccountId: A, home, now: NOW })).toThrow(ChatsyncError);
     expect(readFileSync(join(sessions, B, ORG1, `${ID2}.json`), "utf8")).toBe(before);
     expect(existsSync(join(sessions, B, ORG1, `${ID1}.json`))).toBe(false);
     expect(existsSync(join(home, "state.json"))).toBe(false);
@@ -109,7 +109,7 @@ describe("applyPlan", () => {
 
   it("leaves no temp files", () => {
     const { appDir, sessions, home } = setup();
-    applyPlan(plan(appDir), { sessionsDir: sessions, home, now: NOW });
+    applyPlan(plan(appDir), { sessionsDir: sessions, activeAccountId: A, home, now: NOW });
     expect(allFiles(sessions).filter((f) => f.includes("chatsync-tmp"))).toEqual([]);
     expect(allFiles(home).filter((f) => f.includes("chatsync-tmp"))).toEqual([]);
   });
@@ -119,7 +119,7 @@ describe("applyPlan", () => {
     writeFileSync(join(sessions, B, ORG1, `${ID2}.json`), '{"sessionId": "local_');
     let code: number | undefined;
     try {
-      applyPlan(plan(appDir), { sessionsDir: sessions, home, now: NOW });
+      applyPlan(plan(appDir), { sessionsDir: sessions, activeAccountId: A, home, now: NOW });
     } catch (err: unknown) {
       code = err instanceof ChatsyncError ? err.exitCode : undefined;
     }
@@ -131,7 +131,7 @@ describe("applyPlan", () => {
     const { appDir, sessions, home } = setup();
     failures.prune = true;
     try {
-      const result = applyPlan(plan(appDir), { sessionsDir: sessions, home, now: NOW });
+      const result = applyPlan(plan(appDir), { sessionsDir: sessions, activeAccountId: A, home, now: NOW });
       expect(result.written).toBe(2);
       expect(result.pruned).toEqual([]);
       expect(result.warning).toContain("boom");
@@ -156,7 +156,7 @@ describe("applyPlan safety", () => {
     const evil: Write = { ...good, sessionId: "../../../x" };
     const bad = { ...p, writes: [good, evil] };
     const before = allFiles(dirname(sessions));
-    expect(() => applyPlan(bad, { sessionsDir: sessions, home, now: NOW })).toThrow(
+    expect(() => applyPlan(bad, { sessionsDir: sessions, activeAccountId: A, home, now: NOW })).toThrow(
       expect.objectContaining({ name: "ChatsyncError", exitCode: 2 }),
     );
     expect(existsSync(join(home, "backups"))).toBe(false);
@@ -167,7 +167,7 @@ describe("applyPlan safety", () => {
     const { appDir, sessions, home } = setup();
     const p = plan(appDir);
     const bad = { ...p, writes: [{ ...firstWrite(p), sessionId: "session-1" }] };
-    expect(() => applyPlan(bad, { sessionsDir: sessions, home })).toThrow(expect.objectContaining({ exitCode: 2 }));
+    expect(() => applyPlan(bad, { sessionsDir: sessions, activeAccountId: A, home })).toThrow(expect.objectContaining({ exitCode: 2 }));
     expect(existsSync(join(home, "backups"))).toBe(false);
   });
 
@@ -180,7 +180,7 @@ describe("applyPlan safety", () => {
       { ...w, orgId: "../.." },
       { ...w, orgId: ORG2 },
     ]) {
-      expect(() => applyPlan({ ...p, writes: [variant] }, { sessionsDir: sessions, home })).toThrow(
+      expect(() => applyPlan({ ...p, writes: [variant] }, { sessionsDir: sessions, activeAccountId: A, home })).toThrow(
         expect.objectContaining({ exitCode: 2 }),
       );
     }
@@ -203,7 +203,7 @@ describe("applyPlan safety", () => {
     mkdirSync(join(sessions, B, ORG2, `${ID1}.json`));
     let error: unknown;
     try {
-      applyPlan(p, { sessionsDir: sessions, home, now: NOW });
+      applyPlan(p, { sessionsDir: sessions, activeAccountId: A, home, now: NOW });
     } catch (err: unknown) {
       error = err;
     }
@@ -214,6 +214,32 @@ describe("applyPlan safety", () => {
     expect(message).toContain(join(home, "backups", "2026-10-22_153005"));
     expect(existsSync(join(home, "state.json"))).toBe(false);
     expect(allFiles(sessions).filter((f) => f.includes("chatsync-tmp"))).toEqual([]);
+  });
+});
+
+describe("applyPlan active account guard", () => {
+  it("refuses a write to the signed-in account before backup or any write", () => {
+    const { appDir, sessions, home } = setup();
+    const p = plan(appDir);
+    const good = p.writes[0];
+    if (!good) throw new Error("expected a write");
+    const intoActive: Write = { ...good, accountId: A };
+    const before = allFiles(dirname(sessions));
+    expect(() =>
+      applyPlan({ ...p, writes: [good, intoActive] }, { sessionsDir: sessions, home, activeAccountId: A, now: NOW }),
+    ).toThrow(expect.objectContaining({ name: "ChatsyncError", exitCode: 2 }));
+    expect(existsSync(join(home, "backups"))).toBe(false);
+    expect(existsSync(join(home, "state.json"))).toBe(false);
+    expect(allFiles(dirname(sessions))).toEqual(before);
+  });
+
+  it("refuses when the signed-in account is one the plan was going to write", () => {
+    const { appDir, sessions, home } = setup();
+    // The plan targets B; if B has since become the signed-in account, nothing may be written.
+    expect(() => applyPlan(plan(appDir), { sessionsDir: sessions, home, activeAccountId: B, now: NOW })).toThrow(
+      expect.objectContaining({ exitCode: 2 }),
+    );
+    expect(existsSync(join(home, "backups"))).toBe(false);
   });
 });
 
@@ -229,7 +255,7 @@ describe("applyPlan state", () => {
       },
     });
     const home = join(root, "home");
-    applyPlan(plan(appDir), { sessionsDir: sessionsDir(appDir), home, now: NOW });
+    applyPlan(plan(appDir), { sessionsDir: sessionsDir(appDir), activeAccountId: A, home, now: NOW });
     expect(loadState(home)).toEqual({ sessions: { [ID1]: { [A]: 50, [B]: 200, [C]: 200 } } });
   });
 
@@ -238,7 +264,7 @@ describe("applyPlan state", () => {
     failures.saveState = true;
     failures.prune = true;
     try {
-      const result = applyPlan(plan(appDir), { sessionsDir: sessions, home, now: NOW });
+      const result = applyPlan(plan(appDir), { sessionsDir: sessions, activeAccountId: A, home, now: NOW });
       expect(result.written).toBe(2);
       expect(result.warning).toContain("save sync state");
       expect(result.warning).toContain("prune");

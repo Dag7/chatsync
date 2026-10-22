@@ -19,7 +19,19 @@ export type Write = {
 /** A chat that changed in two or more accounts since the last sync. The newest copy still wins. */
 export type Conflict = { sessionId: string; title: string; accountIds: string[] };
 
-export type Plan = { chats: Chat[]; writes: Write[]; conflicts: Conflict[]; unchanged: number };
+/** A chat the signed-in account lacks or holds only an older copy of. It is never written; the user must switch accounts. */
+export type BehindChat = { sessionId: string; title: string; reason: "missing" | "older" };
+
+export type Plan = {
+  chats: Chat[];
+  writes: Write[];
+  conflicts: Conflict[];
+  unchanged: number;
+  /** Chats the signed-in account lacks or holds an older copy of. Reported only; the signed-in account is never written. */
+  activeBehind: BehindChat[];
+  /** Inactive accounts with no org folder, so there is nowhere to write. */
+  skippedAccounts: string[];
+};
 
 /** True when `a` should be preferred over `b` as the newest copy. */
 function isNewer(a: Entry, b: Entry, activeAccountId: string): boolean {
@@ -72,9 +84,15 @@ function changedAccounts(chat: Chat, state: SyncState): string[] {
  */
 export function buildPlan(input: { store: Store; activeAccountId: string | null; state: SyncState }): Plan {
   const { store, activeAccountId, state } = input;
-  if (activeAccountId === null || !store.accounts.some((a) => a.id === activeAccountId)) {
+  if (activeAccountId === null) {
     throw new ChatsyncError(
       "Cannot tell which account is active in Claude. Open the Claude desktop app, sign in, and try again.",
+      2,
+    );
+  }
+  if (!store.accounts.some((a) => a.id === activeAccountId)) {
+    throw new ChatsyncError(
+      `Signed-in account ${activeAccountId.slice(0, 8)} has no Code chats yet; start one chat under it, then run chatsync again.`,
       2,
     );
   }
@@ -82,11 +100,25 @@ export function buildPlan(input: { store: Store; activeAccountId: string | null;
   const chats = groupBySession(store, activeAccountId);
   const writes: Write[] = [];
   const conflicts: Conflict[] = [];
+  const activeBehind: BehindChat[] = [];
+  const skippedAccounts: string[] = [];
   let unchanged = 0;
+
+  for (const account of store.accounts) {
+    if (account.id !== activeAccountId && account.orgs.length === 0) skippedAccounts.push(account.id);
+  }
 
   for (const chat of chats) {
     const { newest } = chat;
     const from = { accountId: newest.accountId, orgId: newest.orgId };
+
+    const activeCopies = chat.copies.filter((c) => c.accountId === activeAccountId);
+    const title = newest.data.title ?? chat.sessionId;
+    if (activeCopies.length === 0) {
+      activeBehind.push({ sessionId: chat.sessionId, title, reason: "missing" });
+    } else if (Math.max(...activeCopies.map((c) => c.data.lastActivityAt)) < newest.data.lastActivityAt) {
+      activeBehind.push({ sessionId: chat.sessionId, title, reason: "older" });
+    }
 
     for (const account of store.accounts) {
       if (account.id === activeAccountId) continue;
@@ -130,5 +162,5 @@ export function buildPlan(input: { store: Store; activeAccountId: string | null;
     }
   }
 
-  return { chats, writes, conflicts, unchanged };
+  return { chats, writes, conflicts, unchanged, activeBehind, skippedAccounts };
 }
