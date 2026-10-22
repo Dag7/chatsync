@@ -90,15 +90,29 @@ export function buildPlan(input: { store: Store; activeAccountId: string | null;
 
     for (const account of store.accounts) {
       if (account.id === activeAccountId) continue;
-      const copies = chat.copies.filter((c) => c.accountId === account.id);
+      const populated = account.orgs.filter((o) => o.entries.length > 0);
+      const fallback = account.orgs.find((o) => o.id === newest.orgId) ?? account.orgs[0];
+      const targets = populated.length > 0 ? populated : fallback ? [fallback] : [];
 
-      if (copies.length > 0) {
-        for (const copy of copies) {
+      for (const org of targets) {
+        const here = chat.copies.filter((c) => c.accountId === account.id && c.orgId === org.id);
+        if (here.length === 0) {
+          writes.push({
+            sessionId: chat.sessionId,
+            accountId: account.id,
+            orgId: org.id,
+            kind: "copy",
+            from,
+            data: newest.data,
+          });
+          continue;
+        }
+        for (const copy of here) {
           if (copy.data.lastActivityAt < newest.data.lastActivityAt) {
             writes.push({
               sessionId: chat.sessionId,
               accountId: account.id,
-              orgId: copy.orgId,
+              orgId: org.id,
               kind: "update",
               from,
               data: newest.data,
@@ -107,21 +121,6 @@ export function buildPlan(input: { store: Store; activeAccountId: string | null;
             unchanged++;
           }
         }
-        continue;
-      }
-
-      const populated = account.orgs.filter((o) => o.entries.length > 0);
-      const fallback = account.orgs.find((o) => o.id === newest.orgId) ?? account.orgs[0];
-      const targets = populated.length > 0 ? populated : fallback ? [fallback] : [];
-      for (const org of targets) {
-        writes.push({
-          sessionId: chat.sessionId,
-          accountId: account.id,
-          orgId: org.id,
-          kind: "copy",
-          from,
-          data: newest.data,
-        });
       }
     }
 

@@ -71,9 +71,36 @@ describe("buildPlan", () => {
     const store = makeStore({
       [A]: { [ORG1]: [entry({ id: "s1", at: 100 })] },
       [B]: { [ORG1]: [entry({ id: "s1", at: 500 })] },
+      [C]: { [ORG1]: [] },
     });
     const plan = buildPlan({ store, activeAccountId: A, state: noState });
+    expect(plan.writes.map((w) => [w.accountId, w.kind])).toEqual([[C, "copy"]]);
     expect(plan.writes.filter((w) => w.accountId === A)).toEqual([]);
+  });
+
+  it("updates a stale copy and copies into another populated org of the same account", () => {
+    const store = makeStore({
+      [A]: { [ORG1]: [entry({ id: "s1", at: 200 })] },
+      [B]: { [ORG1]: [entry({ id: "s1", at: 100 })], [ORG2]: [entry({ id: "other", at: 1 })] },
+    });
+    const plan = buildPlan({ store, activeAccountId: A, state: noState });
+    const s1 = plan.writes.filter((w) => w.sessionId === "s1");
+    expect(s1.map((w) => [w.accountId, w.orgId, w.kind])).toEqual([
+      [B, ORG1, "update"],
+      [B, ORG2, "copy"],
+    ]);
+  });
+
+  it("updates only the older of two copies in one inactive account", () => {
+    const store = makeStore({
+      [A]: { [ORG1]: [] },
+      [B]: { [ORG1]: [entry({ id: "s1", at: 100 })], [ORG2]: [entry({ id: "s1", at: 300 })] },
+    });
+    const plan = buildPlan({ store, activeAccountId: A, state: noState });
+    expect(plan.writes.map((w) => [w.accountId, w.orgId, w.kind, w.from.orgId])).toEqual([
+      [B, ORG1, "update", ORG2],
+    ]);
+    expect(plan.unchanged).toBe(1);
   });
 
   it("writes to every org of the target that has chats", () => {
@@ -168,6 +195,15 @@ describe("buildPlan", () => {
     });
     expect(buildPlan({ store, activeAccountId: C, state: noState }).chats[0]?.newest.accountId).toBe(C);
     expect(buildPlan({ store, activeAccountId: B, state: noState }).chats[0]?.newest.accountId).toBe(B);
+  });
+
+  it("breaks ties between inactive accounts by account id when the active account has no copy", () => {
+    const store = makeStore({
+      [C]: { [ORG1]: [] },
+      [B]: { [ORG1]: [entry({ id: "s1", at: 100 })] },
+      [A]: { [ORG1]: [entry({ id: "s1", at: 100 })] },
+    });
+    expect(buildPlan({ store, activeAccountId: C, state: noState }).chats[0]?.newest.accountId).toBe(A);
   });
 
   it("throws exit 2 for a null or unknown active account", () => {
