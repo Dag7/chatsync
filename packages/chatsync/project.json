@@ -13,11 +13,11 @@
     },
     "typecheck": {
       "executor": "nx:run-commands",
-      "options": { "command": "tsc -p tsconfig.build.json --noEmit", "cwd": "packages/chatsync" }
+      "options": { "command": "tsc -p tsconfig.json --noEmit", "cwd": "packages/chatsync" }
     },
     "test": {
       "executor": "nx:run-commands",
-      "options": { "command": "vitest run --passWithNoTests", "cwd": "packages/chatsync" }
+      "options": { "command": "vitest run --passWithNoTests --configLoader runner", "cwd": "packages/chatsync" }
     },
     "lint": { "executor": "nx:run-commands", "options": { "command": "eslint src", "cwd": "packages/chatsync" } }
   }

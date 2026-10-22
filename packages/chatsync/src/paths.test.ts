@@ -8,15 +8,9 @@ describe("paths", () => {
   });
 
   it("appDataDir elsewhere throws exit 2", () => {
-    const call = () => appDataDir({ platform: "linux", home: "/h", env: {} });
-    expect(call).toThrow(/macOS only/);
-    try {
-      call();
-      expect.unreachable("should have thrown");
-    } catch (err) {
-      expect(err).toBeInstanceOf(ChatsyncError);
-      expect((err as ChatsyncError).exitCode).toBe(2);
-    }
+    expect(() => appDataDir({ platform: "linux", home: "/h", env: {} })).toThrow(
+      expect.objectContaining({ name: "ChatsyncError", exitCode: 2, message: expect.stringMatching(/macOS only/) }),
+    );
   });
 
   it("env overrides", () => {
