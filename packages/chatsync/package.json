@@ -1,0 +1,48 @@
+{
+  "name": "chatsync",
+  "version": "0.1.0",
+  "description": "Sync Claude desktop sidebar entries between accounts",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Dag7/chatsync.git"
+  },
+  "homepage": "https://github.com/Dag7/chatsync",
+  "keywords": [
+    "claude",
+    "claude-desktop",
+    "claude-code",
+    "sync",
+    "sessions",
+    "cli"
+  ],
+  "bin": "./dist/index.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.build.json --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^8.5.2",
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.10"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
