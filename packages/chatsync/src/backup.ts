@@ -31,7 +31,12 @@ function isDir(path: string): boolean {
 export function createBackup(o: { sessionsDir: string; backupsDir: string; now?: Date }): string {
   if (!isDir(o.sessionsDir)) throw new ChatsyncError(`Nothing to back up: ${o.sessionsDir} does not exist`, 1);
   const base = timestampName(o.now ?? new Date());
-  mkdirSync(o.backupsDir, { recursive: true });
+  try {
+    mkdirSync(o.backupsDir, { recursive: true });
+  } catch (err: unknown) {
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new ChatsyncError(`Backup failed: ${reason}`, 1);
+  }
   let name = base;
   for (let n = 2; existsSync(join(o.backupsDir, name)) || existsSync(join(o.backupsDir, name + PARTIAL)); n++) {
     name = `${base}-${n}`;
