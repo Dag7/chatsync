@@ -1,4 +1,4 @@
-import { statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { createBackup, pruneBackups } from "./backup.js";
 import { ChatsyncError } from "./errors.js";
@@ -68,17 +68,19 @@ function stateAfter(plan: Plan): SyncState {
 }
 
 /**
- * Applies a plan: refuse any write to the signed-in account, validate every target, back up the sessions folder (a failure aborts before
- * anything is written), write each entry atomically, record the new sync state, prune old backups.
+ * Applies a plan: refuse any write to the signed-in account (unless `allowActiveCopies`, which permits
+ * only a copy to a file that does not exist yet), validate every target, back up the sessions folder (a
+ * failure aborts before anything is written), write each entry atomically, record the new sync state,
+ * prune old backups.
  * Failures to save state or prune after the entries are written never fail the sync; they are
  * returned as `warning`.
  */
 export function applyPlan(
   plan: Plan,
-  o: { sessionsDir: string; home: string; activeAccountId: string; now?: Date },
+  o: { sessionsDir: string; home: string; activeAccountId: string; now?: Date; allowActiveCopies?: boolean },
 ): ApplyResult {
   // The running app owns the signed-in account's files; refuse before anything is touched.
-  const forbidden = plan.writes.find((w) => w.accountId === o.activeAccountId);
+  const forbidden = plan.writes.find((w) => w.accountId === o.activeAccountId && (o.allowActiveCopies !== true || w.kind !== "copy"));
   if (forbidden) {
     throw new ChatsyncError(
       `Refusing to write chat "${forbidden.sessionId}" to the signed-in account ${forbidden.accountId.slice(0, 8)}; nothing was written`,
@@ -91,7 +93,15 @@ export function applyPlan(
     return { backup: null, written: 0, pruned: [] };
   }
 
-  const targets = plan.writes.map((w) => ({ file: targetFor(w, o.sessionsDir), data: w.data }));
+  const targets = plan.writes.map((w) => ({ file: targetFor(w, o.sessionsDir), data: w.data, accountId: w.accountId, sessionId: w.sessionId }));
+  // Into the signed-in account we only add new files, never overwrite what the app already has.
+  const clobber = targets.find((t) => t.accountId === o.activeAccountId && existsSync(t.file));
+  if (clobber) {
+    throw new ChatsyncError(
+      `Refusing to overwrite chat "${clobber.sessionId}" in the signed-in account ${clobber.accountId.slice(0, 8)}: it already has an entry; nothing was written`,
+      2,
+    );
+  }
 
   const backupsDir = join(o.home, "backups");
   const backup = createBackup({ sessionsDir: o.sessionsDir, backupsDir, ...(o.now ? { now: o.now } : {}) });

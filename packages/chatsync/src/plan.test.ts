@@ -248,3 +248,91 @@ describe("buildPlan", () => {
     expect(plan.writes.map((w) => w.accountId)).toEqual([C]);
   });
 });
+
+describe("buildPlan includeActive", () => {
+  it("adds a copy into the signed-in account for a chat it is missing", () => {
+    const store = makeStore({
+      [A]: { [ORG1]: [entry({ id: "mine", at: 50, title: "Mine" })] },
+      [B]: { [ORG1]: [entry({ id: "theirs", at: 100, title: "Theirs" })] },
+    });
+    const plan = buildPlan({ store, activeAccountId: A, state: noState, includeActive: true });
+    expect(plan.writes).toEqual([
+      {
+        sessionId: "mine",
+        accountId: B,
+        orgId: ORG1,
+        kind: "copy",
+        from: { accountId: A, orgId: ORG1 },
+        data: entry({ id: "mine", at: 50, title: "Mine" }),
+      },
+      {
+        sessionId: "theirs",
+        accountId: A,
+        orgId: ORG1,
+        kind: "copy",
+        from: { accountId: B, orgId: ORG1 },
+        data: entry({ id: "theirs", at: 100, title: "Theirs" }),
+      },
+    ]);
+    expect(plan.activeBehind).toEqual([]);
+  });
+
+  it("never updates the signed-in account's older copy; it stays behind as older", () => {
+    const store = makeStore({
+      [A]: { [ORG1]: [entry({ id: "x", at: 10, title: "X" })] },
+      [B]: { [ORG1]: [entry({ id: "x", at: 20, title: "X" }), entry({ id: "y", at: 5, title: "Y" })] },
+    });
+    const plan = buildPlan({ store, activeAccountId: A, state: noState, includeActive: true });
+    expect(plan.writes).toEqual([
+      {
+        sessionId: "y",
+        accountId: A,
+        orgId: ORG1,
+        kind: "copy",
+        from: { accountId: B, orgId: ORG1 },
+        data: entry({ id: "y", at: 5, title: "Y" }),
+      },
+    ]);
+    expect(plan.writes.filter((w) => w.accountId === A && w.kind === "update")).toEqual([]);
+    expect(plan.activeBehind).toEqual([{ sessionId: "x", title: "X", reason: "older" }]);
+  });
+
+  it("uses the same target-org rule as inactive accounts", () => {
+    const store = makeStore({
+      [A]: { [ORG1]: [], [ORG2]: [entry({ id: "keep", at: 1 })] },
+      [B]: { [ORG1]: [entry({ id: "s1", at: 100 })] },
+    });
+    const plan = buildPlan({ store, activeAccountId: A, state: noState, includeActive: true });
+    // Only ORG2 has entries, so it is the only populated target.
+    expect(plan.writes.filter((w) => w.accountId === A).map((w) => [w.sessionId, w.orgId])).toEqual([["s1", ORG2]]);
+
+    const empty = makeStore({ [A]: { [ORG1]: [], [ORG2]: [] }, [B]: { [ORG2]: [entry({ id: "s1", at: 100 })] } });
+    const p2 = buildPlan({ store: empty, activeAccountId: A, state: noState, includeActive: true });
+    // No populated org: falls back to the org matching the newest copy's org.
+    expect(p2.writes.filter((w) => w.accountId === A).map((w) => w.orgId)).toEqual([ORG2]);
+
+    const first = makeStore({ [A]: { [ORG1]: [], [ORG2]: [] }, [B]: { [C]: [entry({ id: "s1", at: 100 })] } });
+    const p3 = buildPlan({ store: first, activeAccountId: A, state: noState, includeActive: true });
+    expect(p3.writes.filter((w) => w.accountId === A).map((w) => w.orgId)).toEqual([ORG1]);
+  });
+
+  it("skips a signed-in account with no org folder and keeps the chat behind", () => {
+    const store = makeStore({ [A]: {}, [B]: { [ORG1]: [entry({ id: "s1", at: 100, title: "S" })] } });
+    const plan = buildPlan({ store, activeAccountId: A, state: noState, includeActive: true });
+    expect(plan.writes.filter((w) => w.accountId === A)).toEqual([]);
+    expect(plan.skippedAccounts).toEqual([A]);
+    expect(plan.activeBehind).toEqual([{ sessionId: "s1", title: "S", reason: "missing" }]);
+  });
+
+  it("without the option the signed-in account is untouched and still reported", () => {
+    const store = makeStore({
+      [A]: { [ORG1]: [] },
+      [B]: { [ORG1]: [entry({ id: "s1", at: 100, title: "S" })] },
+    });
+    const plan = buildPlan({ store, activeAccountId: A, state: noState });
+    expect(plan.writes).toEqual([]);
+    expect(plan.activeBehind).toEqual([{ sessionId: "s1", title: "S", reason: "missing" }]);
+    const off = buildPlan({ store, activeAccountId: A, state: noState, includeActive: false });
+    expect(off).toEqual(plan);
+  });
+});

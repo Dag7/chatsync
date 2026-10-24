@@ -19,7 +19,7 @@ export type Write = {
 /** A chat that changed in two or more accounts since the last sync. The newest copy still wins. */
 export type Conflict = { sessionId: string; title: string; accountIds: string[] };
 
-/** A chat the signed-in account lacks or holds only an older copy of. It is never written; the user must switch accounts. */
+/** A chat the signed-in account lacks or holds only an older copy of. Never updated in place; copies into it happen only with `includeActive`. */
 export type BehindChat = { sessionId: string; title: string; reason: "missing" | "older" };
 
 export type Plan = {
@@ -27,9 +27,9 @@ export type Plan = {
   writes: Write[];
   conflicts: Conflict[];
   unchanged: number;
-  /** Chats the signed-in account lacks or holds an older copy of. Reported only; the signed-in account is never written. */
+  /** Chats the signed-in account lacks or holds an older copy of and that this plan does not copy into it. */
   activeBehind: BehindChat[];
-  /** Inactive accounts with no org folder, so there is nowhere to write. */
+  /** Accounts with no org folder, so there is nowhere to write (the signed-in one only counts with `includeActive`). */
   skippedAccounts: string[];
 };
 
@@ -80,10 +80,18 @@ function changedAccounts(chat: Chat, state: SyncState): string[] {
 
 /**
  * Decides what to write so every account lists every chat. Pure: reads nothing, writes nothing.
- * The active account is never a write target because the running app owns its files.
+ * The active account is not a write target because the running app owns its files. With
+ * `includeActive` it becomes an add-only target: chats it has no copy of are copied in, but its
+ * existing entries are never updated.
  */
-export function buildPlan(input: { store: Store; activeAccountId: string | null; state: SyncState }): Plan {
+export function buildPlan(input: {
+  store: Store;
+  activeAccountId: string | null;
+  state: SyncState;
+  includeActive?: boolean;
+}): Plan {
   const { store, activeAccountId, state } = input;
+  const includeActive = input.includeActive === true;
   if (activeAccountId === null) {
     throw new ChatsyncError(
       "Cannot tell which account is active in Claude. Open the Claude desktop app, sign in, and try again.",
@@ -105,7 +113,7 @@ export function buildPlan(input: { store: Store; activeAccountId: string | null;
   let unchanged = 0;
 
   for (const account of store.accounts) {
-    if (account.id !== activeAccountId && account.orgs.length === 0) skippedAccounts.push(account.id);
+    if ((includeActive || account.id !== activeAccountId) && account.orgs.length === 0) skippedAccounts.push(account.id);
   }
 
   for (const chat of chats) {
@@ -114,14 +122,12 @@ export function buildPlan(input: { store: Store; activeAccountId: string | null;
 
     const activeCopies = chat.copies.filter((c) => c.accountId === activeAccountId);
     const title = newest.data.title ?? chat.sessionId;
-    if (activeCopies.length === 0) {
-      activeBehind.push({ sessionId: chat.sessionId, title, reason: "missing" });
-    } else if (Math.max(...activeCopies.map((c) => c.data.lastActivityAt)) < newest.data.lastActivityAt) {
-      activeBehind.push({ sessionId: chat.sessionId, title, reason: "older" });
-    }
+    let copiedIntoActive = false;
 
     for (const account of store.accounts) {
-      if (account.id === activeAccountId) continue;
+      const isActive = account.id === activeAccountId;
+      // The active account only gains chats it has no copy of; it is never updated.
+      if (isActive && (!includeActive || activeCopies.length > 0)) continue;
       const populated = account.orgs.filter((o) => o.entries.length > 0);
       const fallback = account.orgs.find((o) => o.id === newest.orgId) ?? account.orgs[0];
       const targets = populated.length > 0 ? populated : fallback ? [fallback] : [];
@@ -137,6 +143,7 @@ export function buildPlan(input: { store: Store; activeAccountId: string | null;
             from,
             data: newest.data,
           });
+          if (isActive) copiedIntoActive = true;
           continue;
         }
         for (const copy of here) {
@@ -153,6 +160,14 @@ export function buildPlan(input: { store: Store; activeAccountId: string | null;
             unchanged++;
           }
         }
+      }
+    }
+
+    if (!copiedIntoActive) {
+      if (activeCopies.length === 0) {
+        activeBehind.push({ sessionId: chat.sessionId, title, reason: "missing" });
+      } else if (Math.max(...activeCopies.map((c) => c.data.lastActivityAt)) < newest.data.lastActivityAt) {
+        activeBehind.push({ sessionId: chat.sessionId, title, reason: "older" });
       }
     }
 

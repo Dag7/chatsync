@@ -1,6 +1,6 @@
 # chatsync
 
-Copy Claude desktop Code-tab sidebar entries between the accounts you are signed in with on one Mac, so every account can list every chat. The account you are signed into is never written: it receives the other accounts' chats the next time you run `chatsync sync` from a different account.
+Copy Claude desktop Code-tab sidebar entries between the accounts you are signed in with on one Mac, so every account can list every chat. The account you are signed into is never written (unless you use `--include-active` with Claude quit, see below): it receives the other accounts' chats the next time you run `chatsync sync` from a different account.
 
 ## The problem
 
@@ -35,7 +35,7 @@ npx chatsync
 
 **Run `chatsync sync` before you switch accounts.**
 
-The account you are signed into is never written to, because the running app holds its entries in memory and could overwrite them. So the account you are about to leave is the one that pushes its latest progress to all the others. Then switch accounts in Claude, and the chats should appear in the other account's sidebar. The signed-in account itself only catches up the next time you run `chatsync sync` while signed into a different account. When the signed-in account is missing chats or holds older copies, `status` and `sync` say so.
+The account you are signed into is not written to, because the running app holds its entries in memory and could overwrite them (the one exception is `--include-active` with Claude quit, below). So the account you are about to leave is the one that pushes its latest progress to all the others. Then switch accounts in Claude, and the chats should appear in the other account's sidebar. The signed-in account itself only catches up the next time you run `chatsync sync` while signed into a different account. When the signed-in account is missing chats or holds older copies, `status` and `sync` say so.
 
 The first time, check the result in the app: chatsync relies on app files that Anthropic does not document (see the last section).
 
@@ -44,13 +44,23 @@ chatsync sync --dry-run   # see what would change; writes nothing
 chatsync sync             # show the plan, ask, back up, write
 ```
 
+### Bringing chats into the account you're signed in to
+
+If you would rather not switch accounts, you can add the missing chats straight to the account you are signed in to, as long as Claude is fully closed:
+
+1. Quit Claude (⌘Q).
+2. Run `chatsync sync --include-active` (add `--dry-run` first to see the plan).
+3. Reopen Claude.
+
+This is add-only: chatsync only adds entries the signed-in account does not have yet. It never overwrites or updates one the app already has, so a chat the account holds an older copy of stays as it is (it is still reported as older). A backup is taken first, and `chatsync restore` undoes it. chatsync refuses to run `--include-active` while Claude is running, and checks again right before writing.
+
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `chatsync` | Interactive menu (in a terminal): Status, Sync, Backups / restore, Accounts, Quit. Outside a terminal it prints help. |
 | `chatsync status [--json]` | Shows the signed-in account, then every chat grouped by machine: which accounts have it, which copy is newest (marked `*`), and what a sync would do. Also prints the sections prompt (see below). Changes nothing. |
-| `chatsync sync [--dry-run] [-y] [--json]` | Prints the plan and counts (copy, update, unchanged, conflicts). Without `--dry-run` it asks for confirmation, backs up, then writes. `-y` skips the question. `--json` prints machine-readable output and never prompts, so applying needs `-y`. |
+| `chatsync sync [--dry-run] [-y] [--json] [--include-active]` | Prints the plan and counts (copy, update, unchanged, conflicts). Without `--dry-run` it asks for confirmation, backs up, then writes. `-y` skips the question. `--json` prints machine-readable output and never prompts, so applying needs `-y`. `--include-active` also copies chats the signed-in account lacks into it (add-only); Claude must be quit, except with `--dry-run`. Not in the interactive menu. |
 | `chatsync backups` | Lists backups with their chat counts. |
 | `chatsync restore [name]` | Replaces the Claude sessions folder with a backup. Pick one from a menu or pass its name. Claude must be quit. Asks for confirmation; `-y` skips the question, and is required when there is no terminal. |
 | `chatsync accounts` | Lists the accounts with a few recent chat titles each, and lets you give each a nickname (stored in `~/.chatsync/config.json`). |
@@ -62,7 +72,7 @@ Exit codes: `0` ok, `1` error, `2` unsupported platform or data that chatsync do
 ## Safety
 
 - **Backup before every write.** The whole sessions folder is copied to `~/.chatsync/backups/<YYYY-MM-DD_HHMMSS>/` before `sync` or `restore` changes anything. The newest 20 backups are kept, plus the oldest one (the copy from before chatsync first wrote anything).
-- **Never writes to the signed-in account.**
+- **Never writes to the signed-in account**, unless you pass `--include-active` with Claude quit; then it only adds new entries and never overwrites an existing one.
 - **Never deletes** a sidebar entry.
 - **Atomic writes.** Each entry is written to a temporary file and renamed into place.
 - **Conflicts are reported, not hidden.** If a chat changed in two or more accounts since the last sync, the newest copy still wins, the chat is listed as a conflict, and the other copy stays in the backup.

@@ -243,6 +243,80 @@ describe("applyPlan active account guard", () => {
   });
 });
 
+describe("applyPlan allowActiveCopies", () => {
+  /** A is signed in and lacks ID3, which B holds; A holds an older ID2 than B's. */
+  function activeSetup() {
+    const root = tmpDir();
+    const appDir = makeAppDir(root, {
+      active: A,
+      accounts: {
+        [A]: { [ORG1]: [entry({ id: ID2, at: 10, title: "old" })] },
+        [B]: { [ORG1]: [entry({ id: ID2, at: 50, title: "new" }), entry({ id: ID3, at: 70, title: "only B" })] },
+      },
+    });
+    const p = buildPlan({ store: loadStore(appDir), activeAccountId: A, state: { sessions: {} }, includeActive: true });
+    return { appDir, p, sessions: sessionsDir(appDir), home: join(root, "home") };
+  }
+
+  it("permits a new-file copy into the signed-in account", () => {
+    const { p, sessions, home } = activeSetup();
+    expect(p.writes.filter((w) => w.accountId === A).map((w) => [w.sessionId, w.kind])).toEqual([[ID3, "copy"]]);
+    const result = applyPlan(p, { sessionsDir: sessions, activeAccountId: A, home, now: NOW, allowActiveCopies: true });
+    expect(result.written).toBe(p.writes.length);
+    expect(result.backup).toBe("2026-10-22_153005");
+    expect(JSON.parse(readFileSync(join(sessions, A, ORG1, `${ID3}.json`), "utf8"))).toEqual(
+      entry({ id: ID3, at: 70, title: "only B" }),
+    );
+    // The older copy A already had is untouched.
+    expect(JSON.parse(readFileSync(join(sessions, A, ORG1, `${ID2}.json`), "utf8"))).toEqual(
+      entry({ id: ID2, at: 10, title: "old" }),
+    );
+    expect(loadState(home).sessions[ID3]).toEqual({ [A]: 70, [B]: 70 });
+  });
+
+  it("rejects an update to the signed-in account before the backup", () => {
+    const { p, sessions, home } = activeSetup();
+    const copy = p.writes.find((w) => w.accountId === A);
+    if (!copy) throw new Error("expected a write into A");
+    const update: Write = { ...copy, sessionId: ID2, kind: "update", data: entry({ id: ID2, at: 50, title: "new" }) };
+    const before = allFiles(dirname(sessions));
+    expect(() =>
+      applyPlan({ ...p, writes: [...p.writes, update] }, { sessionsDir: sessions, activeAccountId: A, home, now: NOW, allowActiveCopies: true }),
+    ).toThrow(expect.objectContaining({ name: "ChatsyncError", exitCode: 2 }));
+    expect(existsSync(join(home, "backups"))).toBe(false);
+    expect(existsSync(join(home, "state.json"))).toBe(false);
+    expect(allFiles(dirname(sessions))).toEqual(before);
+  });
+
+  it("rejects a copy whose target file already exists before the backup", () => {
+    const { p, sessions, home } = activeSetup();
+    const copy = p.writes.find((w) => w.accountId === A);
+    if (!copy) throw new Error("expected a write into A");
+    const clobber: Write = { ...copy, sessionId: ID2, kind: "copy", data: entry({ id: ID2, at: 50, title: "new" }) };
+    const before = allFiles(dirname(sessions));
+    const old = readFileSync(join(sessions, A, ORG1, `${ID2}.json`), "utf8");
+    expect(() =>
+      applyPlan({ ...p, writes: [...p.writes, clobber] }, { sessionsDir: sessions, activeAccountId: A, home, now: NOW, allowActiveCopies: true }),
+    ).toThrow(expect.objectContaining({ name: "ChatsyncError", exitCode: 2 }));
+    expect(existsSync(join(home, "backups"))).toBe(false);
+    expect(allFiles(dirname(sessions))).toEqual(before);
+    expect(readFileSync(join(sessions, A, ORG1, `${ID2}.json`), "utf8")).toBe(old);
+  });
+
+  it("still rejects any write to the signed-in account by default", () => {
+    const { p, sessions, home } = activeSetup();
+    const before = allFiles(dirname(sessions));
+    expect(() => applyPlan(p, { sessionsDir: sessions, activeAccountId: A, home, now: NOW })).toThrow(
+      expect.objectContaining({ name: "ChatsyncError", exitCode: 2 }),
+    );
+    expect(() => applyPlan(p, { sessionsDir: sessions, activeAccountId: A, home, now: NOW, allowActiveCopies: false })).toThrow(
+      expect.objectContaining({ exitCode: 2 }),
+    );
+    expect(existsSync(join(home, "backups"))).toBe(false);
+    expect(allFiles(dirname(sessions))).toEqual(before);
+  });
+});
+
 describe("applyPlan state", () => {
   it("records each account's actual post-sync value", () => {
     const root = tmpDir();

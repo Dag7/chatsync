@@ -29,6 +29,10 @@ type Menu = "status" | "sync" | "backups" | "accounts" | "quit";
 
 const NO_ACTIVE_ACCOUNT = "Cannot tell which account is active in Claude. Open the Claude desktop app, sign in, and try again.";
 
+const QUIT_FIRST =
+  "Quit Claude first (⌘Q): --include-active writes to the signed-in account, which is only safe while Claude is closed.";
+const RUNNING_DRY_RUN = "Claude is running: quit it before running this without --dry-run.";
+
 function packageVersion(): string {
   const pkg = createRequire(import.meta.url)("../package.json") as { version?: string };
   return pkg.version ?? "0.0.0";
@@ -67,7 +71,7 @@ export function buildProgram(deps: ProgramDeps = {}): Command {
   const appDir = (): string => appDataDir(pathOpts);
 
   /** Reads everything needed for a plan. Read-only: creates no files. */
-  function load(): { plan: Plan; ctx: OutputCtx; store: Store; app: string; home: string } {
+  function load(includeActive = false): { plan: Plan; ctx: OutputCtx; store: Store; app: string; home: string } {
     const app = appDir();
     const home = homeDir();
     const store = loadStore(app);
@@ -75,7 +79,7 @@ export function buildProgram(deps: ProgramDeps = {}): Command {
     if (active === null) throw new ChatsyncError(NO_ACTIVE_ACCOUNT, 2);
     const sshNames = readSshNames(app);
     const cfg = loadConfig(home);
-    const plan = buildPlan({ store, activeAccountId: active, state: loadState(home) });
+    const plan = buildPlan({ store, activeAccountId: active, state: loadState(home), ...(includeActive ? { includeActive } : {}) });
     return { plan, ctx: { activeAccountId: active, cfg, sshNames }, store, app, home };
   }
 
@@ -86,11 +90,18 @@ export function buildProgram(deps: ProgramDeps = {}): Command {
     out(opts.json ? json(toJson(plan, ctx)) : formatStatus(plan, ctx));
   }
 
-  async function sync(opts: { dryRun?: boolean; yes?: boolean; json?: boolean }): Promise<void> {
-    const { plan, ctx, app, home } = load();
+  async function sync(opts: { dryRun?: boolean; yes?: boolean; json?: boolean; includeActive?: boolean }): Promise<void> {
+    const includeActive = opts.includeActive === true;
+    // Writing the signed-in account is only safe while the app is closed.
+    const requireClosed = (): void => {
+      if (includeActive && isAppRunning()) throw new ChatsyncError(QUIT_FIRST, 1);
+    };
+    if (!opts.dryRun) requireClosed();
+    const { plan, ctx, app, home } = load(includeActive);
     const asJson = opts.json === true;
     if (!asJson) out(formatPlan(plan, ctx));
     if (opts.dryRun) {
+      if (includeActive && isAppRunning()) (asJson ? errOut : out)(RUNNING_DRY_RUN);
       if (asJson) out(json(toJson(plan, ctx)));
       return;
     }
@@ -117,7 +128,7 @@ export function buildProgram(deps: ProgramDeps = {}): Command {
         return;
       }
       // The user may have switched accounts or the app may have written files while the prompt was open.
-      const again = load();
+      const again = load(includeActive);
       if (
         again.ctx.activeAccountId !== ctx.activeAccountId ||
         writeSignature(again.plan) !== writeSignature(plan)
@@ -127,10 +138,12 @@ export function buildProgram(deps: ProgramDeps = {}): Command {
       current = { plan: again.plan, ctx: again.ctx };
     }
 
+    requireClosed();
     const res = applyPlan(current.plan, {
       sessionsDir: sessionsDir(app),
       home,
       activeAccountId: current.ctx.activeAccountId,
+      ...(includeActive ? { allowActiveCopies: true } : {}),
       ...nowOpt(),
     });
     const backupPath = res.backup === null ? null : join(home, "backups", res.backup);
@@ -295,8 +308,9 @@ export function buildProgram(deps: ProgramDeps = {}): Command {
     .description("copy chats so every signed-in account lists every chat")
     .option("--dry-run", "show the plan and change nothing")
     .option("-y, --yes", "apply without asking")
+    .option("--include-active", "also copy missing chats into the account you are signed in to (Claude must be quit)")
     .option("--json", "print JSON")
-    .action((opts: { dryRun?: boolean; yes?: boolean; json?: boolean }) => sync(opts));
+    .action((opts: { dryRun?: boolean; yes?: boolean; json?: boolean; includeActive?: boolean }) => sync(opts));
 
   program
     .command("backups")

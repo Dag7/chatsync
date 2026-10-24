@@ -402,3 +402,130 @@ describe("sync while the confirm prompt is open", () => {
     expect(existsSync(join(fx.home, "backups"))).toBe(false);
   });
 });
+
+describe("sync --include-active", () => {
+  const QUIT =
+    "Quit Claude first (⌘Q): --include-active writes to the signed-in account, which is only safe while Claude is closed.";
+  const RUNNING = "Claude is running: quit it before running this without --dry-run.";
+  const aEntry = (fx: Fixture): string => join(fx.sessions, A, ORG1, `${ID2}.json`);
+
+  it("while Claude is running exits 1 and writes nothing", async () => {
+    const fx = fixture();
+    const r = await run(fx, ["sync", "--include-active", "-y"], { isAppRunning: () => true });
+    expect(r.code).toBe(1);
+    expect(r.err).toContain(QUIT);
+    expect(existsSync(aEntry(fx))).toBe(false);
+    expect(existsSync(bEntry(fx))).toBe(false);
+    expect(existsSync(fx.home)).toBe(false);
+  });
+
+  it("--dry-run while Claude is running exits 0, warns, and writes nothing", async () => {
+    const fx = fixture();
+    const r = await run(fx, ["sync", "--include-active", "--dry-run"], { isAppRunning: () => true });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("copy 2");
+    expect(r.out).toContain(RUNNING);
+    expect(existsSync(aEntry(fx))).toBe(false);
+    expect(existsSync(bEntry(fx))).toBe(false);
+    expect(existsSync(fx.home)).toBe(false);
+  });
+
+  it("--dry-run --json while Claude is running keeps stdout valid JSON", async () => {
+    const fx = fixture();
+    const r = await run(fx, ["sync", "--include-active", "--dry-run", "--json"], { isAppRunning: () => true });
+    expect(r.code).toBe(0);
+    const parsed = JSON.parse(r.out) as { writes: { accountId: string }[] };
+    expect(parsed.writes.map((w) => w.accountId).sort()).toEqual([A, B]);
+    expect(r.err).toContain(RUNNING);
+  });
+
+  it("--dry-run while Claude is closed does not warn", async () => {
+    const fx = fixture();
+    const r = await run(fx, ["sync", "--include-active", "--dry-run"]);
+    expect(r.code).toBe(0);
+    expect(r.out).not.toContain(RUNNING);
+  });
+
+  it("while Claude is closed copies into the signed-in account and prints the backup path", async () => {
+    const fx = fixture();
+    const r = await run(fx, ["sync", "--include-active", "-y"], { now: () => new Date(2026, 9, 22, 15, 30, 5) });
+    expect(r.code).toBe(0);
+    expect(existsSync(aEntry(fx))).toBe(true);
+    expect(existsSync(bEntry(fx))).toBe(true);
+    const backups = readdirSync(join(fx.home, "backups"));
+    expect(backups).toHaveLength(1);
+    expect(r.out).toContain(join(fx.home, "backups", backups[0] as string));
+    expect(r.out).toContain("Wrote 2 entries");
+    // The signed-in account now has every chat, so nothing is reported behind.
+    expect(r.out).not.toContain("missing or older");
+  });
+
+  it("without the flag the signed-in account is still never written", async () => {
+    const fx = fixture();
+    const r = await run(fx, ["sync", "-y"]);
+    expect(r.code).toBe(0);
+    expect(existsSync(aEntry(fx))).toBe(false);
+  });
+
+  it("stops with exit 1 and writes nothing when Claude is running again at the second check", async () => {
+    const fx = fixture();
+    const answers = [false, true];
+    const r = await run(fx, ["sync", "--include-active", "-y"], { isAppRunning: () => answers.shift() ?? true });
+    expect(r.code).toBe(1);
+    expect(r.err).toContain(QUIT);
+    expect(existsSync(aEntry(fx))).toBe(false);
+    expect(existsSync(bEntry(fx))).toBe(false);
+    expect(existsSync(join(fx.home, "backups"))).toBe(false);
+  });
+
+  it("re-checks after the confirm prompt", async () => {
+    const fx = fixture();
+    let running = false;
+    const prompter: Prompter = {
+      async select<T extends string>(): Promise<T> {
+        throw new Error("unexpected select");
+      },
+      async confirm(): Promise<boolean> {
+        running = true; // Claude reopened while the prompt was open
+        return true;
+      },
+      async input(): Promise<string> {
+        throw new Error("unexpected input");
+      },
+    };
+    const r = await run(fx, ["sync", "--include-active"], { isTTY: true, prompter, isAppRunning: () => running });
+    expect(r.code).toBe(1);
+    expect(r.err).toContain(QUIT);
+    expect(existsSync(aEntry(fx))).toBe(false);
+    expect(existsSync(bEntry(fx))).toBe(false);
+    expect(existsSync(join(fx.home, "backups"))).toBe(false);
+  });
+
+  it("labels copies into the signed-in account like any other account", async () => {
+    const fx = fixture();
+    const prompter = fakePrompter({ confirm: [false] });
+    const r = await run(fx, ["sync", "--include-active"], { isTTY: true, prompter });
+    expect(r.out).toContain("copy 1 to aaaaaaaa, 1 to bbbbbbbb");
+  });
+
+  it("--json includes the signed-in account's writes and the result", async () => {
+    const fx = fixture();
+    const r = await run(fx, ["sync", "--include-active", "-y", "--json"]);
+    expect(r.code).toBe(0);
+    const parsed = JSON.parse(r.out) as {
+      writes: { sessionId: string; accountId: string; kind: string }[];
+      result: { written: number };
+    };
+    expect(parsed.writes).toContainEqual({ sessionId: ID2, accountId: A, orgId: ORG1, kind: "copy" });
+    expect(parsed.result.written).toBe(2);
+  });
+
+  it("restore undoes it", async () => {
+    const fx = fixture();
+    await run(fx, ["sync", "--include-active", "-y"]);
+    const [name] = readdirSync(join(fx.home, "backups"));
+    const r = await run(fx, ["restore", name as string, "-y"]);
+    expect(r.code).toBe(0);
+    expect(existsSync(aEntry(fx))).toBe(false);
+  });
+});
