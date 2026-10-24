@@ -1,8 +1,8 @@
-import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { Command, CommanderError } from "commander";
 import { applyPlan } from "./apply.js";
+import { isClaudeRunning } from "./app-running.js";
 import { listBackups, restoreBackup } from "./backup.js";
 import { accountLabel, loadConfig, saveConfig, type ChatsyncConfig } from "./config.js";
 import { ChatsyncError } from "./errors.js";
@@ -38,10 +38,6 @@ function packageVersion(): string {
   return pkg.version ?? "0.0.0";
 }
 
-function defaultIsAppRunning(): boolean {
-  return spawnSync("pgrep", ["-x", "Claude"]).status === 0;
-}
-
 /** Identifies what a plan would write, so a re-plan can be compared with what the user confirmed. */
 function writeSignature(plan: Plan): string {
   return plan.writes
@@ -57,7 +53,7 @@ export function buildProgram(deps: ProgramDeps = {}): Command {
   const errOut = deps.errOut ?? ((t: string) => process.stderr.write(`${t}\n`));
   const env = deps.env ?? process.env;
   const isTTY = deps.isTTY ?? (process.stdin.isTTY === true && process.stdout.isTTY === true);
-  const isAppRunning = deps.isAppRunning ?? defaultIsAppRunning;
+  const isAppRunning = deps.isAppRunning ?? isClaudeRunning;
   const pathOpts = {
     env,
     ...(deps.platform ? { platform: deps.platform } : {}),

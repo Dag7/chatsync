@@ -9,12 +9,17 @@ import { loadState, saveState } from "./state.js";
 import { loadStore } from "./store.js";
 import { A, B, C, ORG1, ORG2, entry, makeAppDir, tmpDir } from "./test-helpers.js";
 
-const failures = vi.hoisted(() => ({ prune: false, saveState: false }));
+const failures = vi.hoisted(() => ({ prune: false, saveState: false, afterBackup: null as (() => void) | null }));
 
 vi.mock("./backup.js", async (importOriginal) => {
   const real = await importOriginal<typeof import("./backup.js")>();
   return {
     ...real,
+    createBackup: (...args: Parameters<typeof real.createBackup>) => {
+      const name = real.createBackup(...args);
+      failures.afterBackup?.();
+      return name;
+    },
     pruneBackups: (...args: Parameters<typeof real.pruneBackups>) => {
       if (failures.prune) throw new ChatsyncError("Cannot read backups folder: boom", 1);
       return real.pruneBackups(...args);
@@ -301,6 +306,56 @@ describe("applyPlan allowActiveCopies", () => {
     expect(existsSync(join(home, "backups"))).toBe(false);
     expect(allFiles(dirname(sessions))).toEqual(before);
     expect(readFileSync(join(sessions, A, ORG1, `${ID2}.json`), "utf8")).toBe(old);
+  });
+
+  it("rejects a mixed plan (active copy plus active update) whole, before any backup or write", () => {
+    const { p, sessions, home } = activeSetup();
+    const copy = p.writes.find((w) => w.accountId === A);
+    if (!copy) throw new Error("expected a write into A");
+    const update: Write = { ...copy, sessionId: ID2, kind: "update", data: entry({ id: ID2, at: 50, title: "new" }) };
+    const before = allFiles(dirname(sessions));
+    const old = readFileSync(join(sessions, A, ORG1, `${ID2}.json`), "utf8");
+    expect(() =>
+      applyPlan({ ...p, writes: [copy, update] }, { sessionsDir: sessions, activeAccountId: A, home, now: NOW, allowActiveCopies: true }),
+    ).toThrow(expect.objectContaining({ name: "ChatsyncError", exitCode: 2 }));
+    expect(existsSync(join(home, "backups"))).toBe(false);
+    expect(existsSync(join(home, "state.json"))).toBe(false);
+    expect(allFiles(dirname(sessions))).toEqual(before);
+    expect(readFileSync(join(sessions, A, ORG1, `${ID2}.json`), "utf8")).toBe(old);
+  });
+
+  it("rejects two writes to the same signed-in target file before the backup", () => {
+    const { p, sessions, home } = activeSetup();
+    const copy = p.writes.find((w) => w.accountId === A);
+    if (!copy) throw new Error("expected a write into A");
+    const before = allFiles(dirname(sessions));
+    expect(() =>
+      applyPlan({ ...p, writes: [copy, { ...copy }] }, { sessionsDir: sessions, activeAccountId: A, home, now: NOW, allowActiveCopies: true }),
+    ).toThrow(expect.objectContaining({ name: "ChatsyncError", exitCode: 2 }));
+    expect(existsSync(join(home, "backups"))).toBe(false);
+    expect(allFiles(dirname(sessions))).toEqual(before);
+  });
+
+  it("re-checks right before each write: a file that appears after the backup is not overwritten", () => {
+    const { p, sessions, home } = activeSetup();
+    const target = join(sessions, A, ORG1, `${ID3}.json`);
+    const appVersion = JSON.stringify(entry({ id: ID3, at: 999, title: "app wrote this" }));
+    failures.afterBackup = () => writeFileSync(target, appVersion);
+    let error: unknown;
+    try {
+      applyPlan(p, { sessionsDir: sessions, activeAccountId: A, home, now: NOW, allowActiveCopies: true });
+    } catch (err: unknown) {
+      error = err;
+    } finally {
+      failures.afterBackup = null;
+    }
+    expect(error).toBeInstanceOf(ChatsyncError);
+    const message = (error as ChatsyncError).message;
+    expect(message).toContain(target);
+    expect(message).toMatch(/after \d+ of \d+ entries/);
+    expect(message).toContain(join(home, "backups", "2026-10-22_153005"));
+    expect(readFileSync(target, "utf8")).toBe(appVersion);
+    expect(existsSync(join(home, "state.json"))).toBe(false);
   });
 
   it("still rejects any write to the signed-in account by default", () => {

@@ -95,6 +95,11 @@ export function applyPlan(
 
   const targets = plan.writes.map((w) => ({ file: targetFor(w, o.sessionsDir), data: w.data, accountId: w.accountId, sessionId: w.sessionId }));
   // Into the signed-in account we only add new files, never overwrite what the app already has.
+  const activeFiles = targets.filter((t) => t.accountId === o.activeAccountId).map((t) => t.file);
+  const dup = activeFiles.find((f, i) => activeFiles.indexOf(f) !== i);
+  if (dup) {
+    throw new ChatsyncError(`Refusing to write ${dup} twice in the signed-in account; nothing was written`, 2);
+  }
   const clobber = targets.find((t) => t.accountId === o.activeAccountId && existsSync(t.file));
   if (clobber) {
     throw new ChatsyncError(
@@ -108,6 +113,14 @@ export function applyPlan(
 
   let written = 0;
   for (const t of targets) {
+    // The app may have created the file since validation; never overwrite it in the signed-in account.
+    if (t.accountId === o.activeAccountId && existsSync(t.file)) {
+      throw new ChatsyncError(
+        `Not overwriting ${t.file}: it appeared after ${written} of ${targets.length} entries were written. ` +
+          `Your previous sessions are saved in ${join(backupsDir, backup)}`,
+        1,
+      );
+    }
     try {
       writeFileAtomic(t.file, JSON.stringify(t.data));
     } catch (err: unknown) {
