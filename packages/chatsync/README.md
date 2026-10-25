@@ -54,6 +54,17 @@ If you would rather not switch accounts, you can add the missing chats straight 
 
 This is add-only: chatsync only adds entries the signed-in account does not have yet. It never overwrites or updates one the app already has, so a chat the account holds an older copy of stays as it is (it is still reported as older). A backup is taken first, and `chatsync restore` undoes it. chatsync refuses to run `--include-active` while Claude is running, and checks again right before writing.
 
+### Repairing earlier copies
+
+A sidebar entry carries a few fields that only make sense for the account that created it: the link to its remote `claude` process (`sshReattach`, `sshRemoteProcessId`) and its last error banner (`error`, `errorAt`, `errorRows`, `priorErrorMark`). Copies no longer carry them, so a copied chat starts a fresh process under the account you are signed in to instead of reattaching to the other account's (and its quota). Copies made by older versions still carry them. Run `chatsync repair` once, with Claude quit, to clean those:
+
+```sh
+chatsync repair --dry-run   # list the copies it would clean; writes nothing
+chatsync repair             # ask, back up, clean
+```
+
+repair only touches entries chatsync copied: the ones recorded in `~/.chatsync/state.json`, and chats that the oldest backup (the copy from before chatsync first wrote anything) held only in other accounts. Your own chats and brand-new chats are left alone, and only those six fields are removed.
+
 ## Commands
 
 | Command | What it does |
@@ -61,6 +72,7 @@ This is add-only: chatsync only adds entries the signed-in account does not have
 | `chatsync` | Interactive menu (in a terminal): Status, Sync, Backups / restore, Accounts, Quit. Outside a terminal it prints help. |
 | `chatsync status [--json]` | Shows the signed-in account, then every chat grouped by machine: which accounts have it, which copy is newest (marked `*`), and what a sync would do. Also prints the sections prompt (see below). Changes nothing. |
 | `chatsync sync [--dry-run] [-y] [--json] [--include-active]` | Prints the plan and counts (copy, update, unchanged, conflicts). Without `--dry-run` it asks for confirmation, backs up, then writes. `-y` skips the question. `--json` prints machine-readable output and never prompts, so applying needs `-y`. `--include-active` also copies chats the signed-in account lacks into it (add-only); Claude must be quit, except with `--dry-run`. Not in the interactive menu. |
+| `chatsync repair [--dry-run] [-y] [--json]` | Removes the other account's process link and error banner from copies made by older versions of chatsync (see "Repairing earlier copies"). Claude must be quit, except with `--dry-run`. Asks for confirmation and backs up first; `-y` skips the question, and is required when there is no terminal. Not in the interactive menu. |
 | `chatsync backups` | Lists backups with their chat counts. |
 | `chatsync restore [name]` | Replaces the Claude sessions folder with a backup. Pick one from a menu or pass its name. Claude must be quit. Asks for confirmation; `-y` skips the question, and is required when there is no terminal. |
 | `chatsync accounts` | Lists the accounts with a few recent chat titles each, and lets you give each a nickname (stored in `~/.chatsync/config.json`). |

@@ -92,7 +92,11 @@ function readEntry(file: string, accountId: string, orgId: string): Entry {
 
 /** Reads every `local_*.json` entry under `<appDir>/claude-code-sessions/<account>/<org>/`. */
 export function loadStore(appDir: string): Store {
-  const root = sessionsDir(appDir);
+  return loadStoreAt(sessionsDir(appDir));
+}
+
+/** Like `loadStore`, for a sessions folder itself (or a backup, which is a copy of one). */
+export function loadStoreAt(root: string): Store {
   if (!existsSync(root) || !statPath(root).isDirectory()) {
     throw new ChatsyncError(`Claude sessions folder not found: ${root}`, 2);
   }

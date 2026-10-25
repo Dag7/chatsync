@@ -10,8 +10,9 @@ import { formatBreakdown, formatPlan, formatStatus, toJson, type OutputCtx } fro
 import { appDataDir, chatsyncHome, sessionsDir } from "./paths.js";
 import { buildPlan, type Plan } from "./plan.js";
 import { inquirerPrompter, type Prompter } from "./prompter.js";
+import { applyRepair, findRepairTargets, hasCopyRecords, repairSignature, type RepairTarget } from "./repair.js";
 import { loadState } from "./state.js";
-import { loadStore, readActiveAccount, readSshNames, type Store } from "./store.js";
+import { loadStore, loadStoreAt, readActiveAccount, readSshNames, type Store } from "./store.js";
 
 export interface ProgramDeps {
   out?: (t: string) => void;
@@ -32,6 +33,11 @@ const NO_ACTIVE_ACCOUNT = "Cannot tell which account is active in Claude. Open t
 const QUIT_FIRST =
   "Quit Claude first (⌘Q): --include-active writes to the signed-in account, which is only safe while Claude is closed.";
 const RUNNING_DRY_RUN = "Claude is running: quit it before running this without --dry-run.";
+const QUIT_FIRST_REPAIR = "Quit Claude first (⌘Q): repair edits sidebar entries, which is only safe while Claude is closed.";
+const RUNNING_DRY_RUN_REPAIR = "Claude is running: quit it before running repair without --dry-run.";
+const NO_COPY_RECORDS = "No record of earlier copies; nothing to repair.";
+
+const entries = (n: number): string => `${n} ${n === 1 ? "entry" : "entries"}`;
 
 function packageVersion(): string {
   const pkg = createRequire(import.meta.url)("../package.json") as { version?: string };
@@ -149,6 +155,91 @@ export function buildProgram(deps: ProgramDeps = {}): Command {
       if (backupPath) out(`Backup: ${backupPath}`);
       out(`Wrote ${res.written} ${res.written === 1 ? "entry" : "entries"}`);
       if (res.pruned.length > 0) out(`Pruned ${res.pruned.length} old ${res.pruned.length === 1 ? "backup" : "backups"}`);
+    }
+    if (res.warning) errOut(res.warning);
+  }
+
+  /** Entries chatsync copied earlier that still carry account-bound fields; null when nothing records any copy. */
+  function scanRepair(): { targets: RepairTarget[]; cfg: ChatsyncConfig; app: string; home: string } | null {
+    const app = appDir();
+    const home = homeDir();
+    const store = loadStore(app);
+    const state = loadState(home);
+    const oldest = listBackups(join(home, "backups")).at(-1);
+    let snapshot: Store | null = null;
+    if (oldest) {
+      try {
+        snapshot = loadStoreAt(oldest.path);
+      } catch (err: unknown) {
+        throw new ChatsyncError(
+          `Cannot read the oldest backup ${oldest.name}: ${err instanceof Error ? err.message : String(err)}`,
+          2,
+        );
+      }
+    }
+    if (snapshot === null && !hasCopyRecords(state)) return null;
+    return { targets: findRepairTargets({ store, state, snapshot }), cfg: loadConfig(home), app, home };
+  }
+
+  async function repair(opts: { dryRun?: boolean; yes?: boolean; json?: boolean }): Promise<void> {
+    const asJson = opts.json === true;
+    const requireClosed = (): void => {
+      if (isAppRunning()) throw new ChatsyncError(QUIT_FIRST_REPAIR, 1);
+    };
+    if (!opts.dryRun) requireClosed();
+    const scan = scanRepair();
+    if (scan === null) {
+      out(asJson ? json({ targets: [] }) : NO_COPY_RECORDS);
+      return;
+    }
+    const { targets, cfg, app, home } = scan;
+    const summary = targets.map((t) => ({ sessionId: t.sessionId, accountId: t.accountId, orgId: t.orgId, fields: t.fields }));
+    const listing = (): string =>
+      [
+        ...targets.map(
+          (t) => `${t.data.title ?? t.sessionId}  [${accountLabel(t.accountId, cfg)}]  removes: ${t.fields.join(", ")}`,
+        ),
+        `repair ${entries(targets.length)}`,
+      ].join("\n");
+
+    if (opts.dryRun) {
+      if (!asJson) out(targets.length === 0 ? "Nothing to repair." : listing());
+      if (isAppRunning()) (asJson ? errOut : out)(RUNNING_DRY_RUN_REPAIR);
+      if (asJson) out(json({ targets: summary }));
+      return;
+    }
+
+    if (targets.length === 0) {
+      out(asJson ? json({ targets: [] }) : "Nothing to repair.");
+      return;
+    }
+    if (!asJson) out(listing());
+
+    let current = targets;
+    if (opts.yes !== true) {
+      if (asJson) throw new ChatsyncError("--json never prompts: pass -y to repair", 1);
+      if (!isTTY) throw new ChatsyncError("Not an interactive terminal: pass -y to repair", 1);
+      if (!(await prompts().confirm("Proceed?"))) {
+        out("Cancelled");
+        return;
+      }
+      // Claude may have started, or entries changed, while the prompt was open.
+      requireClosed();
+      const again = scanRepair();
+      if (again === null || repairSignature(again.targets) !== repairSignature(targets)) {
+        throw new ChatsyncError("The sidebar entries changed while waiting; run chatsync repair again", 2);
+      }
+      current = again.targets;
+    }
+
+    requireClosed();
+    const res = applyRepair(current, { sessionsDir: sessionsDir(app), home, beforeWrite: requireClosed, ...nowOpt() });
+    const backupPath = join(home, "backups", res.backup);
+    if (asJson) {
+      out(json({ targets: summary, result: { backup: backupPath, repaired: res.repaired } }));
+    } else {
+      out(`Backup: ${backupPath}`);
+      out(`Repaired ${entries(res.repaired)}.`);
     }
     if (res.warning) errOut(res.warning);
   }
@@ -307,6 +398,14 @@ export function buildProgram(deps: ProgramDeps = {}): Command {
     .option("--include-active", "also copy missing chats into the account you are signed in to (Claude must be quit)")
     .option("--json", "print JSON")
     .action((opts: { dryRun?: boolean; yes?: boolean; json?: boolean; includeActive?: boolean }) => sync(opts));
+
+  program
+    .command("repair")
+    .description("remove the signed-in-account links and errors that earlier versions copied into other accounts (Claude must be quit)")
+    .option("--dry-run", "show what would change and change nothing")
+    .option("-y, --yes", "repair without asking")
+    .option("--json", "print JSON")
+    .action((opts: { dryRun?: boolean; yes?: boolean; json?: boolean }) => repair(opts));
 
   program
     .command("backups")
