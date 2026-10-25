@@ -1,8 +1,15 @@
+import { withoutAccountBound } from "./entry-fields.js";
 import { ChatsyncError } from "./errors.js";
 import type { Entry, EntryData, Store } from "./store.js";
 
-/** Last synced `lastActivityAt` per session per account: sessionId -> accountId -> timestamp. */
-export type SyncState = { sessions: Record<string, Record<string, number>> };
+/** Where chatsync copied a chat to: sessionId -> target accountId -> source account and the org folders written. */
+export type CopyRecords = Record<string, Record<string, { from: string; orgIds: string[] }>>;
+
+/**
+ * What chatsync remembers between runs: the last synced `lastActivityAt` per session per account
+ * (sessionId -> accountId -> timestamp), and the provenance of the copies it wrote.
+ */
+export type SyncState = { sessions: Record<string, Record<string, number>>; copies?: CopyRecords };
 
 /** One logical chat: every copy of a session across accounts, with the most recently active one singled out. */
 export type Chat = { sessionId: string; newest: Entry; copies: Entry[] };
@@ -119,6 +126,9 @@ export function buildPlan(input: {
   for (const chat of chats) {
     const { newest } = chat;
     const from = { accountId: newest.accountId, orgId: newest.orgId };
+    // Account-bound fields (process link, error banner) are meaningless in another account.
+    const foreignData = withoutAccountBound(newest.data);
+    const dataFor = (accountId: string): EntryData => (accountId === newest.accountId ? newest.data : foreignData);
 
     const activeCopies = chat.copies.filter((c) => c.accountId === activeAccountId);
     const title = newest.data.title ?? chat.sessionId;
@@ -141,7 +151,7 @@ export function buildPlan(input: {
             orgId: org.id,
             kind: "copy",
             from,
-            data: newest.data,
+            data: dataFor(account.id),
           });
           if (isActive) copiedIntoActive = true;
           continue;
@@ -154,7 +164,7 @@ export function buildPlan(input: {
               orgId: org.id,
               kind: "update",
               from,
-              data: newest.data,
+              data: dataFor(account.id),
             });
           } else {
             unchanged++;

@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ChatsyncError } from "./errors.js";
 import { writeFileAtomic } from "./fs-util.js";
-import type { SyncState } from "./plan.js";
+import type { CopyRecords, SyncState } from "./plan.js";
 
 const stateFile = (home: string): string => join(home, "state.json");
 
@@ -10,16 +10,39 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-function isSyncState(v: unknown): v is SyncState {
-  if (!isRecord(v) || !isRecord(v.sessions)) return false;
-  return Object.values(v.sessions).every((s) => isRecord(s) && Object.values(s).every((n) => typeof n === "number"));
+function isSessions(v: unknown): v is SyncState["sessions"] {
+  return isRecord(v) && Object.values(v).every((s) => isRecord(s) && Object.values(s).every((n) => typeof n === "number"));
 }
 
-/** The last synced state. Missing or unparsable state is treated as empty: it only affects conflict detection. */
+function isCopyRecords(v: unknown): v is CopyRecords {
+  return (
+    isRecord(v) &&
+    Object.values(v).every(
+      (byAccount) =>
+        isRecord(byAccount) &&
+        Object.values(byAccount).every(
+          (r) =>
+            isRecord(r) &&
+            typeof r.from === "string" &&
+            Array.isArray(r.orgIds) &&
+            r.orgIds.every((o) => typeof o === "string"),
+        ),
+    )
+  );
+}
+
+/**
+ * The saved state. Missing or unparsable state is treated as empty: `sessions` only affects conflict
+ * detection. A `copies` field of the wrong shape is dropped without losing `sessions`.
+ */
 export function loadState(home: string): SyncState {
   try {
     const parsed: unknown = JSON.parse(readFileSync(stateFile(home), "utf8"));
-    if (isSyncState(parsed)) return parsed;
+    if (isRecord(parsed) && isSessions(parsed.sessions)) {
+      return isCopyRecords(parsed.copies)
+        ? { sessions: parsed.sessions, copies: parsed.copies }
+        : { sessions: parsed.sessions };
+    }
   } catch {
     // fall through to empty state
   }

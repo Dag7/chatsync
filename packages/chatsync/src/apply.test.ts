@@ -80,7 +80,59 @@ describe("applyPlan", () => {
     // A is the active account and was never written, so its older copy keeps its own value.
     expect(loadState(home)).toEqual({
       sessions: { [ID1]: { [A]: 200, [B]: 200 }, [ID2]: { [A]: 50, [B]: 50 } },
+      copies: { [ID1]: { [B]: { from: A, orgIds: [ORG1] } } },
     });
+  });
+
+  it("records provenance of every copy, merges with earlier records, ignores updates", () => {
+    const { appDir, sessions, home } = setup();
+    // ID1: copy A -> B (A is newest). ID2: update of B's stale copy (no record).
+    applyPlan(plan(appDir), { sessionsDir: sessions, activeAccountId: A, home, now: NOW });
+    expect(loadState(home).copies).toEqual({ [ID1]: { [B]: { from: A, orgIds: [ORG1] } } });
+
+    // Merge: other records are kept and an orgId is appended once.
+    saveState(home, {
+      sessions: {},
+      copies: { [ID1]: { [B]: { from: A, orgIds: [ORG2] } }, [ID3]: { [A]: { from: B, orgIds: [ORG1] } } },
+    });
+    const forced: Plan = {
+      ...plan(appDir),
+      writes: [{ sessionId: ID1, accountId: B, orgId: ORG1, kind: "copy", from: { accountId: A, orgId: ORG1 }, data: entry({ id: ID1, at: 200 }) }],
+    };
+    const again = { sessionsDir: sessions, activeAccountId: A, home };
+    applyPlan(forced, { ...again, now: new Date(2026, 9, 22, 15, 30, 6) });
+    applyPlan(forced, { ...again, now: new Date(2026, 9, 22, 15, 30, 7) });
+    expect(loadState(home).copies).toEqual({
+      [ID1]: { [B]: { from: A, orgIds: [ORG2, ORG1] } },
+      [ID3]: { [A]: { from: B, orgIds: [ORG1] } },
+    });
+  });
+
+  it("keeps provenance records when there is nothing to write", () => {
+    const root = tmpDir();
+    const appDir = makeAppDir(root, {
+      active: A,
+      accounts: { [A]: { [ORG1]: [entry({ id: ID1, at: 5 })] }, [B]: { [ORG1]: [entry({ id: ID1, at: 5 })] } },
+    });
+    const home = join(root, "home");
+    saveState(home, { sessions: {}, copies: { [ID1]: { [B]: { from: A, orgIds: [ORG1] } } } });
+    applyPlan(plan(appDir), { sessionsDir: sessionsDir(appDir), activeAccountId: A, home });
+    expect(loadState(home).copies).toEqual({ [ID1]: { [B]: { from: A, orgIds: [ORG1] } } });
+  });
+
+  it("writes stripped data for a cross-account copy", () => {
+    const root = tmpDir();
+    const appDir = makeAppDir(root, {
+      active: A,
+      accounts: {
+        [A]: { [ORG1]: [{ ...entry({ id: ID1, at: 5, title: "t" }), sshRemoteProcessId: 7, error: "x", cwd: "/w" }] },
+        [B]: { [ORG1]: [] },
+      },
+    });
+    const home = join(root, "home");
+    applyPlan(plan(appDir), { sessionsDir: sessionsDir(appDir), activeAccountId: A, home, now: NOW });
+    const written = JSON.parse(readFileSync(join(sessionsDir(appDir), B, ORG1, `${ID1}.json`), "utf8")) as unknown;
+    expect(written).toEqual({ ...entry({ id: ID1, at: 5, title: "t" }), cwd: "/w" });
   });
 
   it("no writes -> no backup", () => {
@@ -385,7 +437,10 @@ describe("applyPlan state", () => {
     });
     const home = join(root, "home");
     applyPlan(plan(appDir), { sessionsDir: sessionsDir(appDir), activeAccountId: A, home, now: NOW });
-    expect(loadState(home)).toEqual({ sessions: { [ID1]: { [A]: 50, [B]: 200, [C]: 200 } } });
+    expect(loadState(home)).toEqual({
+      sessions: { [ID1]: { [A]: 50, [B]: 200, [C]: 200 } },
+      copies: { [ID1]: { [C]: { from: B, orgIds: [ORG1] } } },
+    });
   });
 
   it("a saveState failure after writing is returned as a warning, combined with a prune warning", () => {

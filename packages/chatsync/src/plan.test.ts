@@ -153,7 +153,66 @@ describe("buildPlan", () => {
     const rich: EntryData = { ...entry({ id: "s1", at: 100 }), cwd: "/x", extra: { n: 1 } };
     const store = makeStore({ [A]: { [ORG1]: [rich] }, [B]: { [ORG1]: [] } });
     const plan = buildPlan({ store, activeAccountId: A, state: noState });
-    expect(plan.writes[0]?.data).toBe(rich);
+    expect(plan.writes[0]?.data).toEqual(rich);
+  });
+
+  describe("account-bound fields", () => {
+    const bound = {
+      sshReattach: { host: "h" },
+      sshRemoteProcessId: 99,
+      error: "quota exhausted",
+      errorAt: 5,
+      errorRows: ["r"],
+      priorErrorMark: 7,
+    };
+    const rich = (): EntryData => ({ ...entry({ id: "s1", at: 100, title: "T" }), ...bound, cwd: "/x", extra: { n: 1 } });
+
+    it("a cross-account copy has none of the six keys and keeps other fields", () => {
+      const store = makeStore({ [A]: { [ORG1]: [rich()] }, [B]: { [ORG1]: [] } });
+      const plan = buildPlan({ store, activeAccountId: A, state: noState });
+      const data = plan.writes[0]?.data ?? {};
+      for (const k of Object.keys(bound)) expect(data).not.toHaveProperty(k);
+      expect(data).toEqual({ ...entry({ id: "s1", at: 100, title: "T" }), cwd: "/x", extra: { n: 1 } });
+    });
+
+    it("a cross-account update is stripped too", () => {
+      const store = makeStore({
+        [A]: { [ORG1]: [{ ...rich(), lastActivityAt: 300 }] },
+        [B]: { [ORG1]: [{ ...entry({ id: "s1", at: 100 }), error: "old" }] },
+        [C]: { [ORG1]: [] },
+      });
+      const plan = buildPlan({ store, activeAccountId: C, state: noState });
+      const w = plan.writes.find((x) => x.accountId === B);
+      expect(w?.kind).toBe("update");
+      for (const k of Object.keys(bound)) expect(w?.data).not.toHaveProperty(k);
+    });
+
+    it("an --include-active copy into the signed-in account is stripped", () => {
+      const store = makeStore({ [A]: { [ORG1]: [] }, [B]: { [ORG1]: [rich()] } });
+      const plan = buildPlan({ store, activeAccountId: A, state: noState, includeActive: true });
+      const w = plan.writes.find((x) => x.accountId === A);
+      expect(w?.kind).toBe("copy");
+      for (const k of Object.keys(bound)) expect(w?.data).not.toHaveProperty(k);
+    });
+
+    it("a copy into another org of the same account keeps them unchanged", () => {
+      const src = rich();
+      const store = makeStore({ [A]: { [ORG1]: [src], [ORG2]: [entry({ id: "s2", at: 1 })] }, [B]: { [ORG1]: [] } });
+      const plan = buildPlan({ store, activeAccountId: B, state: noState });
+      const w = plan.writes.find((x) => x.accountId === A && x.orgId === ORG2 && x.sessionId === "s1");
+      expect(w?.kind).toBe("copy");
+      expect(w?.data).toBe(src);
+      expect(w?.data).toHaveProperty("sshReattach");
+    });
+
+    it("does not mutate the source entry", () => {
+      const src = rich();
+      const snapshot = JSON.parse(JSON.stringify(src)) as unknown;
+      const store = makeStore({ [A]: { [ORG1]: [src] }, [B]: { [ORG1]: [] } });
+      buildPlan({ store, activeAccountId: A, state: noState });
+      expect(src).toEqual(snapshot);
+      expect(store.accounts[0]?.orgs[0]?.entries[0]?.data).toBe(src);
+    });
   });
 
   it("conflict when two accounts changed since last state", () => {
