@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadState, saveState } from "./state.js";
@@ -41,5 +41,34 @@ describe("loadState", () => {
     for (const copies of bad) {
       expect(loadState(homeWith({ sessions: { s1: { a: 1 } }, copies }))).toEqual({ sessions: { s1: { a: 1 } } });
     }
+  });
+});
+
+describe("saveState with a malformed copies field on disk", () => {
+  it("keeps the old file as state.json.bad before overwriting, once", () => {
+    const original = JSON.stringify({ sessions: { s1: { a: 1 } }, copies: { s1: "garbage" } });
+    const home = homeWith(original);
+    saveState(home, { sessions: { s1: { a: 2 } } });
+    expect(readFileSync(join(home, "state.json.bad"), "utf8")).toBe(original);
+    expect(loadState(home)).toEqual({ sessions: { s1: { a: 2 } } });
+
+    // A later save never replaces the kept copy.
+    writeFileSync(join(home, "state.json"), JSON.stringify({ sessions: {}, copies: [] }));
+    saveState(home, { sessions: {} });
+    expect(readFileSync(join(home, "state.json.bad"), "utf8")).toBe(original);
+  });
+
+  it("makes no .bad file for a valid or absent copies field", () => {
+    for (const content of [
+      { sessions: {} },
+      { sessions: {}, copies: { s1: { b: { from: "a", orgIds: ["o"] } } } },
+    ]) {
+      const home = homeWith(content);
+      saveState(home, { sessions: {} });
+      expect(existsSync(join(home, "state.json.bad"))).toBe(false);
+    }
+    const fresh = tmpDir();
+    saveState(fresh, { sessions: {} });
+    expect(existsSync(join(fresh, "state.json.bad"))).toBe(false);
   });
 });

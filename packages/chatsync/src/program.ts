@@ -10,7 +10,7 @@ import { formatBreakdown, formatPlan, formatStatus, toJson, type OutputCtx } fro
 import { appDataDir, chatsyncHome, sessionsDir } from "./paths.js";
 import { buildPlan, type Plan } from "./plan.js";
 import { inquirerPrompter, type Prompter } from "./prompter.js";
-import { applyRepair, findRepairTargets, hasCopyRecords, repairSignature, type RepairTarget } from "./repair.js";
+import { applyRepair, findRepairTargets, hasCopyRecords, repairSignature, type RepairScan } from "./repair.js";
 import { loadState } from "./state.js";
 import { loadStore, loadStoreAt, readActiveAccount, readSshNames, type Store } from "./store.js";
 
@@ -160,7 +160,7 @@ export function buildProgram(deps: ProgramDeps = {}): Command {
   }
 
   /** Entries chatsync copied earlier that still carry account-bound fields; null when nothing records any copy. */
-  function scanRepair(): { targets: RepairTarget[]; cfg: ChatsyncConfig; app: string; home: string } | null {
+  function scanRepair(): { scan: RepairScan; cfg: ChatsyncConfig; app: string; home: string } | null {
     const app = appDir();
     const home = homeDir();
     const store = loadStore(app);
@@ -178,7 +178,7 @@ export function buildProgram(deps: ProgramDeps = {}): Command {
       }
     }
     if (snapshot === null && !hasCopyRecords(state)) return null;
-    return { targets: findRepairTargets({ store, state, snapshot }), cfg: loadConfig(home), app, home };
+    return { scan: findRepairTargets({ store, state, snapshot }), cfg: loadConfig(home), app, home };
   }
 
   async function repair(opts: { dryRun?: boolean; yes?: boolean; json?: boolean }): Promise<void> {
@@ -187,30 +187,36 @@ export function buildProgram(deps: ProgramDeps = {}): Command {
       if (isAppRunning()) throw new ChatsyncError(QUIT_FIRST_REPAIR, 1);
     };
     if (!opts.dryRun) requireClosed();
-    const scan = scanRepair();
-    if (scan === null) {
-      out(asJson ? json({ targets: [] }) : NO_COPY_RECORDS);
+    const warnIfRunning = (): void => {
+      if (opts.dryRun && isAppRunning()) (asJson ? errOut : out)(RUNNING_DRY_RUN_REPAIR);
+    };
+    const first = scanRepair();
+    if (first === null) {
+      out(asJson ? json({ targets: [], skipped: [] }) : NO_COPY_RECORDS);
+      warnIfRunning();
       return;
     }
-    const { targets, cfg, app, home } = scan;
+    const { cfg, app, home } = first;
+    const { targets, skipped } = first.scan;
     const summary = targets.map((t) => ({ sessionId: t.sessionId, accountId: t.accountId, orgId: t.orgId, fields: t.fields }));
+    const skippedSummary = skipped.map((k) => ({ sessionId: k.sessionId, accountId: k.accountId, orgId: k.orgId }));
     const listing = (): string =>
       [
+        ...skipped.map((k) => `${k.title}  [${accountLabel(k.accountId, cfg)}]  skipped: source not found`),
         ...targets.map(
           (t) => `${t.data.title ?? t.sessionId}  [${accountLabel(t.accountId, cfg)}]  removes: ${t.fields.join(", ")}`,
         ),
-        `repair ${entries(targets.length)}`,
+        targets.length === 0 ? "Nothing to repair." : `repair ${entries(targets.length)}`,
       ].join("\n");
 
-    if (opts.dryRun) {
-      if (!asJson) out(targets.length === 0 ? "Nothing to repair." : listing());
-      if (isAppRunning()) (asJson ? errOut : out)(RUNNING_DRY_RUN_REPAIR);
-      if (asJson) out(json({ targets: summary }));
-      return;
-    }
-
-    if (targets.length === 0) {
-      out(asJson ? json({ targets: [] }) : "Nothing to repair.");
+    if (opts.dryRun || targets.length === 0) {
+      if (asJson) {
+        out(json({ targets: summary, skipped: skippedSummary }));
+        warnIfRunning();
+      } else {
+        out(listing());
+        warnIfRunning();
+      }
       return;
     }
     if (!asJson) out(listing());
@@ -226,17 +232,17 @@ export function buildProgram(deps: ProgramDeps = {}): Command {
       // Claude may have started, or entries changed, while the prompt was open.
       requireClosed();
       const again = scanRepair();
-      if (again === null || repairSignature(again.targets) !== repairSignature(targets)) {
+      if (again === null || repairSignature(again.scan.targets) !== repairSignature(targets)) {
         throw new ChatsyncError("The sidebar entries changed while waiting; run chatsync repair again", 2);
       }
-      current = again.targets;
+      current = again.scan.targets;
     }
 
     requireClosed();
     const res = applyRepair(current, { sessionsDir: sessionsDir(app), home, beforeWrite: requireClosed, ...nowOpt() });
     const backupPath = join(home, "backups", res.backup);
     if (asJson) {
-      out(json({ targets: summary, result: { backup: backupPath, repaired: res.repaired } }));
+      out(json({ targets: summary, skipped: skippedSummary, result: { backup: backupPath, repaired: res.repaired } }));
     } else {
       out(`Backup: ${backupPath}`);
       out(`Repaired ${entries(res.repaired)}.`);

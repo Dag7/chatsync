@@ -63,7 +63,7 @@ chatsync repair --dry-run   # list the copies it would clean; writes nothing
 chatsync repair             # ask, back up, clean
 ```
 
-repair only touches entries chatsync copied: the ones recorded in `~/.chatsync/state.json`, and chats that the oldest backup (the copy from before chatsync first wrote anything) held only in other accounts. Your own chats and brand-new chats are left alone, and only those six fields are removed.
+repair only touches entries chatsync copied: the ones recorded in `~/.chatsync/state.json`, and chats that the oldest backup (the copy from before chatsync first wrote anything) held only in other accounts. Your own chats and brand-new chats are left alone. Only values inherited from the original are removed: a field goes only if the original has the same value, so anything Claude has since written for the copy's own account stays. A copy whose original cannot be found is listed as skipped and left as it is.
 
 ## Commands
 

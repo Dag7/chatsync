@@ -108,6 +108,23 @@ describe("applyPlan", () => {
     });
   });
 
+  it("does not record a copy into another org of the same account", () => {
+    const root = tmpDir();
+    const appDir = makeAppDir(root, {
+      active: B,
+      accounts: {
+        [A]: { [ORG1]: [entry({ id: ID1, at: 5 })], [ORG2]: [entry({ id: ID2, at: 1 })] },
+        [B]: { [ORG1]: [] },
+      },
+    });
+    const home = join(root, "home");
+    const p = buildPlan({ store: loadStore(appDir), activeAccountId: B, state: { sessions: {} } });
+    expect(p.writes.some((w) => w.accountId === A && w.orgId === ORG2 && w.kind === "copy")).toBe(true);
+    applyPlan(p, { sessionsDir: sessionsDir(appDir), activeAccountId: B, home, now: NOW });
+    expect(existsSync(join(sessionsDir(appDir), A, ORG2, `${ID1}.json`))).toBe(true);
+    expect(loadState(home).copies).toBeUndefined();
+  });
+
   it("keeps provenance records when there is nothing to write", () => {
     const root = tmpDir();
     const appDir = makeAppDir(root, {

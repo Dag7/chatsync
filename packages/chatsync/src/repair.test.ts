@@ -5,10 +5,10 @@ import { createBackup } from "./backup.js";
 import { ACCOUNT_BOUND_FIELDS } from "./entry-fields.js";
 import type { Prompter } from "./prompter.js";
 import { type ProgramDeps, runCli } from "./program.js";
-import { applyRepair, type RepairTarget } from "./repair.js";
+import { applyRepair, findRepairTargets, type RepairTarget } from "./repair.js";
 import { saveState } from "./state.js";
-import type { EntryData } from "./store.js";
-import { A, B, ORG1, entry, makeAppDir, tmpDir } from "./test-helpers.js";
+import type { Entry, EntryData, Store } from "./store.js";
+import { A, B, C, ORG1, ORG2, entry, makeAppDir, tmpDir } from "./test-helpers.js";
 
 const ID1 = "local_11111111-1111-4111-8111-111111111111"; // original in A, copied to B
 const ID2 = "local_22222222-2222-4222-8222-222222222222"; // original in B, copied to A
@@ -294,6 +294,136 @@ describe("chatsync repair", () => {
     expect(parsed.targets).toHaveLength(2);
     expect(parsed.result.repaired).toBe(2);
     expect(existsSync(parsed.result.backup)).toBe(true);
+  });
+});
+
+describe("repair removes only inherited values", () => {
+  const writeB = (fx: Fx, data: EntryData): void => writeFileSync(file(fx, B, ID1), JSON.stringify(data));
+
+  it("keeps a field the copy's own account wrote (different value), removes the rest", async () => {
+    const fx = fixture();
+    writeB(fx, { ...bound(ID1, 100, "Alpha"), sshReattach: { sshHost: "mine", pid: 2 } });
+    const r = await run(fx, ["repair", "-y"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("Alpha  [bbbbbbbb]  removes: sshRemoteProcessId, error, errorAt, errorRows, priorErrorMark");
+    expect(read(fx, B, ID1)).toEqual({ ...stripped(bound(ID1, 100, "Alpha")), sshReattach: { sshHost: "mine", pid: 2 } });
+  });
+
+  it("mixed: inherited error goes, own sshReattach stays", async () => {
+    const fx = fixture();
+    const base = entry({ id: ID1, at: 100, title: "Alpha" });
+    writeB(fx, { ...base, sshReattach: { own: true }, error: BOUND.error });
+    const r = await run(fx, ["repair", "-y"]);
+    expect(r.out).toContain("Alpha  [bbbbbbbb]  removes: error\n");
+    expect(read(fx, B, ID1)).toEqual({ ...base, sshReattach: { own: true } });
+  });
+
+  it("an entry whose bound fields are all its own is not a target", async () => {
+    const fx = fixture();
+    writeB(fx, { ...entry({ id: ID1, at: 100, title: "Alpha" }), sshReattach: { own: true }, error: "my own" });
+    const before = readFileSync(file(fx, B, ID1), "utf8");
+    await run(fx, ["repair", "-y"]);
+    expect(readFileSync(file(fx, B, ID1), "utf8")).toBe(before);
+  });
+
+  it("lists a copy whose source cannot be found as skipped and strips nothing", async () => {
+    const fx = fixture({ snapshot: false });
+    saveState(fx.home, { sessions: {}, copies: { [ID3]: { [B]: { from: C, orgIds: [ORG1] } } } });
+    const before = snapshotOf(fx);
+    const r = await run(fx, ["repair", "-y"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("Gamma  [bbbbbbbb]  skipped: source not found");
+    expect(r.out).toContain("Nothing to repair.");
+    expect(snapshotOf(fx)).toEqual(before);
+    expect(existsSync(join(fx.home, "backups"))).toBe(false);
+    const j = await run(fx, ["repair", "--dry-run", "--json"]);
+    expect(JSON.parse(j.out)).toEqual({ targets: [], skipped: [{ sessionId: ID3, accountId: B, orgId: ORG1 }] });
+  });
+});
+
+function store(spec: Record<string, Record<string, EntryData[]>>): Store {
+  return {
+    accounts: Object.entries(spec).map(([accountId, orgs]) => ({
+      id: accountId,
+      orgs: Object.entries(orgs).map(([orgId, datas]) => ({
+        id: orgId,
+        dir: `/mem/${accountId}/${orgId}`,
+        entries: datas.map((data): Entry => ({ accountId, orgId, file: `/mem/${accountId}/${orgId}/${data.sessionId}.json`, data })),
+      })),
+    })),
+  };
+}
+
+describe("findRepairTargets", () => {
+  const s = "local_s";
+  const withBound = (at: number, over: Record<string, unknown> = {}): EntryData => ({ ...entry({ id: s, at }), ...over });
+
+  it("with the original in X/org1 (in the snapshot) and a record for X/org2, only org2 is a target", () => {
+    const x = { sshRemoteProcessId: 1 };
+    const result = findRepairTargets({
+      store: store({ [A]: { [ORG1]: [withBound(5, x)], [ORG2]: [withBound(5, x)] }, [B]: { [ORG1]: [withBound(5, x)] } }),
+      state: { sessions: {}, copies: { [s]: { [A]: { from: B, orgIds: [ORG2] } } } },
+      snapshot: store({ [A]: { [ORG1]: [withBound(5, x)] }, [B]: { [ORG1]: [withBound(1)] } }),
+    });
+    expect(result.targets.map((t) => [t.accountId, t.orgId])).toEqual([[A, ORG2]]);
+  });
+
+  it("a record whose from is the entry's own account is not a copy", () => {
+    const x = { error: "e" };
+    const result = findRepairTargets({
+      store: store({ [A]: { [ORG1]: [withBound(5, x)], [ORG2]: [withBound(5, x)] } }),
+      state: { sessions: {}, copies: { [s]: { [A]: { from: A, orgIds: [ORG2] } } } },
+      snapshot: null,
+    });
+    expect(result).toEqual({ targets: [], skipped: [] });
+  });
+
+  it("snapshot rule compares against the most recently active snapshot entry in another account", () => {
+    const olderSource = { error: "from older" };
+    const newerSource = { error: "from newer" };
+    const result = findRepairTargets({
+      store: store({ [C]: { [ORG1]: [withBound(1, newerSource)] }, [A]: { [ORG1]: [] }, [B]: { [ORG1]: [] } }),
+      state: { sessions: {} },
+      snapshot: store({ [A]: { [ORG1]: [withBound(100, olderSource)] }, [B]: { [ORG1]: [withBound(200, newerSource)] }, [C]: { [ORG1]: [] } }),
+    });
+    expect(result.targets.map((t) => [t.accountId, t.fields])).toEqual([[C, ["error"]]]);
+    const other = findRepairTargets({
+      store: store({ [C]: { [ORG1]: [withBound(1, olderSource)] }, [A]: { [ORG1]: [] }, [B]: { [ORG1]: [] } }),
+      state: { sessions: {} },
+      snapshot: store({ [A]: { [ORG1]: [withBound(100, olderSource)] }, [B]: { [ORG1]: [withBound(200, newerSource)] }, [C]: { [ORG1]: [] } }),
+    });
+    expect(other).toEqual({ targets: [], skipped: [] });
+  });
+
+  it("a recorded source missing from the current store falls back to the snapshot's entry", () => {
+    const x = { sshRemoteProcessId: 9 };
+    const result = findRepairTargets({
+      store: store({ [A]: { [ORG1]: [] }, [B]: { [ORG1]: [withBound(5, x)] } }),
+      state: { sessions: {}, copies: { [s]: { [B]: { from: A, orgIds: [ORG1] } } } },
+      snapshot: store({ [A]: { [ORG1]: [withBound(5, x)] }, [B]: { [ORG1]: [withBound(1)] } }),
+    });
+    expect(result.targets.map((t) => [t.accountId, t.fields])).toEqual([[B, ["sshRemoteProcessId"]]]);
+  });
+});
+
+describe("repair with a malformed state.copies", () => {
+  it("yields no targets", async () => {
+    const fx = fixture({ snapshot: false });
+    mkdirSync(fx.home, { recursive: true });
+    writeFileSync(join(fx.home, "state.json"), JSON.stringify({ sessions: {}, copies: { [ID1]: { [B]: "nope" } } }));
+    const before = snapshotOf(fx);
+    const r = await run(fx, ["repair", "-y"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("No record of earlier copies; nothing to repair.");
+    expect(snapshotOf(fx)).toEqual(before);
+  });
+
+  it("--dry-run still warns when Claude is running and there are no records", async () => {
+    const fx = fixture({ snapshot: false });
+    const r = await run(fx, ["repair", "--dry-run"], { isAppRunning: () => true });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("No record of earlier copies");
+    expect(r.out).toContain("Claude is running: quit it before running repair without --dry-run.");
   });
 });
 

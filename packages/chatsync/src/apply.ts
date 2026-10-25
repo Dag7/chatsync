@@ -13,7 +13,7 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** `previous` plus a record for every copy in the plan; an org folder is listed once. Updates add nothing. */
+/** `previous` plus a record for every cross-account copy in the plan; an org folder is listed once. Updates add nothing. */
 function mergeCopies(previous: CopyRecords | undefined, plan: Plan): CopyRecords {
   const copies: CopyRecords = {};
   for (const [sessionId, byAccount] of Object.entries(previous ?? {})) {
@@ -22,7 +22,8 @@ function mergeCopies(previous: CopyRecords | undefined, plan: Plan): CopyRecords
     );
   }
   for (const w of plan.writes) {
-    if (w.kind !== "copy") continue;
+    // Same-account copies keep the account's own fields, so there is nothing to repair later.
+    if (w.kind !== "copy" || w.from.accountId === w.accountId) continue;
     const byAccount = (copies[w.sessionId] ??= {});
     const record = (byAccount[w.accountId] ??= { from: w.from.accountId, orgIds: [] });
     record.from = w.from.accountId;

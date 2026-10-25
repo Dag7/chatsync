@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ChatsyncError } from "./errors.js";
 import { writeFileAtomic } from "./fs-util.js";
@@ -49,9 +49,25 @@ export function loadState(home: string): SyncState {
   return { sessions: {} };
 }
 
+/**
+ * loadState drops a malformed `copies` field, so saving would erase whatever provenance it held.
+ * Keep the file as `state.json.bad` first (once; best effort).
+ */
+function preserveMalformedCopies(home: string): void {
+  const bad = `${stateFile(home)}.bad`;
+  try {
+    if (!existsSync(stateFile(home)) || existsSync(bad)) return;
+    const parsed: unknown = JSON.parse(readFileSync(stateFile(home), "utf8"));
+    if (isRecord(parsed) && parsed.copies !== undefined && !isCopyRecords(parsed.copies)) copyFileSync(stateFile(home), bad);
+  } catch {
+    // an unreadable previous state is not worth failing the save for
+  }
+}
+
 export function saveState(home: string, state: SyncState): void {
   try {
     mkdirSync(home, { recursive: true });
+    preserveMalformedCopies(home);
     writeFileAtomic(stateFile(home), JSON.stringify(state, null, 2) + "\n");
   } catch (err: unknown) {
     const reason = err instanceof Error ? err.message : String(err);
